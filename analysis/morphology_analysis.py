@@ -8,11 +8,9 @@ class RBCMorphologyAnalyzer:
     Tracks: projected area, circularity, and phase-integrated optical volume.
     """
     def __init__(self):
-        # Thresholds can be empirically tuned based on your dataset
         self.circularity_threshold = 0.85
 
     def compute_morphology(self, mask, phase_map):
-        # Ensure mask is a binary numpy array
         if isinstance(mask, torch.Tensor):
             mask = mask.detach().cpu().numpy()
         if isinstance(phase_map, torch.Tensor):
@@ -29,7 +27,6 @@ class RBCMorphologyAnalyzer:
             return {"area": 0.0, "circularity": 0.0, "optical_volume": 0.0}
             
         perimeter = cv2.arcLength(contours[0], True)
-        # Circularity formula: 4 * pi * Area / Perimeter^2
         circularity = (4 * np.pi * area) / (perimeter ** 2 + 1e-8)
         
         # 3. Phase-Integrated Optical Volume
@@ -41,11 +38,18 @@ class RBCMorphologyAnalyzer:
             "optical_volume": float(opt_volume)
         }
 
-    def classify_morphology(self, circularity, area):
-        """Rule-based classification for storage-induced degradation."""
+    def classify_morphology(self, circularity, area, baseline_area):
+        """
+        Rule-based classification for storage-induced degradation.
+        baseline_area should be the mean area from healthy/day-0 populations.
+        """
+        # FIXED: Removed np.mean(scalar) and added spherocyte logic
         if circularity >= self.circularity_threshold:
+            # High circularity + small area = Spherocyte
+            if area < baseline_area * 0.8:
+                return "spherocyte"
             return "discocyte" # Healthy/Baseline
-        elif circularity < self.circularity_threshold and area > np.mean(area): # Example heuristic
+        elif circularity < self.circularity_threshold and area > baseline_area: 
             return "stomatocyte"
         else:
             return "echinocyte" # Degrading

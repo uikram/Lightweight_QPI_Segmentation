@@ -5,9 +5,9 @@ class SegmentationEvaluator:
     def __init__(self, model, config):
         self.model = model
         self.config = config
-        self.device = config.device
-        # Initialize the metrics tracker from seg_metrics.py
-        self.seg_metrics = SegmentationMetrics(num_classes=config.get('num_classes', 1))
+        self.device = getattr(config, 'device', 'cuda')
+        # Initialize the metrics tracker
+        self.seg_metrics = SegmentationMetrics(num_classes=getattr(config, 'num_classes', 1))
 
     def evaluate(self, test_loader):
         self.model.eval()
@@ -16,13 +16,12 @@ class SegmentationEvaluator:
         print(f"\n[Evaluation] Running Segmentation Inference...")
         with torch.no_grad():
             for batch in test_loader:
-                # Unpack the QPI Dataset batch
-                # Assuming batch yields: (phase_images, target_masks, phase_raw)
-                images = batch[0].to(self.device)
-                targets = batch[1].to(self.device)
+                # FIXED: QPIDataset returns a dictionary, not a tuple
+                images = batch["phase"].to(self.device)
+                targets = batch["mask"].to(self.device)
                 
-                # If phase_raw is passed for the optical volume calculation
-                phase_raw = batch[2].to(self.device) if len(batch) > 2 else images
+                # Fetch unnormalized phase for optical volume calculation
+                phase_raw = batch.get("phase_raw", images).to(self.device)
 
                 # Forward pass
                 logits = self.model(images)
