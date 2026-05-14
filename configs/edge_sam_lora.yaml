@@ -1,0 +1,28 @@
+experiment_name: "edge_sam_lora_qpi"
+
+dataset:
+  phase_dir: "data/qpi/train/phase"
+  mask_dir: "data/qpi/train/mask"
+  batch_size: 16
+  num_workers: 4
+
+model:
+  architecture: "edge_sam"
+  in_channels: 1
+  num_classes: 1
+
+lora:
+  rank_sweep: [2, 4, 8, 16]
+  insertion_strategy: "bottleneck"
+  target_modules: ["bottleneck.*.conv"]
+
+training:
+  epochs: 50
+  learning_rate: 0.0005
+  optimizer: "AdamW"
+  mixed_precision: "fp16"
+
+loss_weights:
+  lambda1_pmc: 0.1
+  lambda2_bga: 0.05
+  lambda3_pv: 0.1

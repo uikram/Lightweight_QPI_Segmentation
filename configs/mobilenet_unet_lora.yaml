@@ -1,0 +1,28 @@
+experiment_name: "mobilenet_unet_lora_qpi"
+
+dataset:
+  phase_dir: "data/qpi/train/phase"
+  mask_dir: "data/qpi/train/mask"
+  batch_size: 16
+  num_workers: 4
+
+model:
+  architecture: "mobilenet_unet"
+  in_channels: 1
+  num_classes: 1
+
+lora:
+  rank_sweep: [2, 4, 8, 16]
+  insertion_strategy: "encoder_only"
+  target_modules: ["encoder.blocks.*.conv"] # Example insertion points
+
+training:
+  epochs: 50
+  learning_rate: 0.001
+  optimizer: "AdamW"
+  mixed_precision: "fp16"
+
+loss_weights:
+  lambda1_pmc: 0.1   # Phase-Mask Contrast
+  lambda2_bga: 0.05  # Boundary-Gradient Alignment
+  lambda3_pv: 0.1    # Phase-Volume Preservation
