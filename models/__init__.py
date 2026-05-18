@@ -45,7 +45,7 @@ def get_model(model_name: str, config):
     # Inject LoRA if rank is specified in config
     lora_r = getattr(config, "lora_r", None)
     if lora_r is not None:
-        strategy     = getattr(config, "lora_strategy",  "attention_blocks")
+        strategy     = getattr(config, "insertion_strategy", "attention_blocks")
         lora_alpha   = getattr(config, "lora_alpha",     float(lora_r))
         lora_dropout = getattr(config, "lora_dropout",   0.0)
         model.inject_lora(r=lora_r, lora_alpha=lora_alpha,

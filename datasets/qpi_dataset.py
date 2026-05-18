@@ -23,9 +23,11 @@ import csv
 import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import WeightedRandomSampler
 from pathlib import Path
 from typing import Optional, Dict, List, Tuple
 from datasets.qpi_augmentation import QPIAugmentation, QPIValTransform
+from datetime import datetime
 
 try:
     import tifffile
@@ -115,9 +117,12 @@ class QPIDataset(Dataset):
 
     # ── Sample collection ─────────────────────────────────────────────────────
     def _collect_samples(self) -> List[Dict]:
+        # Search for both lowercase and uppercase phase map extensions
         phase_files = sorted(
             list(self.phase_dir.glob("*.tif")) +
             list(self.phase_dir.glob("*.tiff")) +
+            list(self.phase_dir.glob("*.TIF")) +
+            list(self.phase_dir.glob("*.TIFF")) +
             list(self.phase_dir.glob("*.npy"))
         )
 
@@ -125,33 +130,67 @@ class QPIDataset(Dataset):
         missing = 0
 
         for pf in phase_files:
-            stem      = pf.stem
+            stem = pf.stem
             mask_path = None
-            for ext in [".tif", ".tiff", ".npy", ".png"]:
-                candidate = self.mask_dir / (stem + ext)
-                if candidate.exists():
-                    mask_path = candidate
+            
+            # Look for exact match, or common mask prefixes/suffixes
+            possible_stems = [
+                stem,
+                f"mask_{stem}",
+                f"{stem}_mask",
+                f"output_mask_{stem}",
+                stem.replace("image", "mask"),
+                stem.replace("image", "output_mask")
+            ]
+            
+            for p_stem in possible_stems:
+                # ADDED: Uppercase .TIFF, .TIF, .PNG to handle Linux case-sensitivity
+                for ext in [".tif", ".tiff", ".npy", ".png", ".TIFF", ".TIF", ".PNG"]:
+                    candidate = self.mask_dir / (p_stem + ext)
+                    if candidate.exists():
+                        mask_path = candidate
+                        break
+                if mask_path:
                     break
 
             if mask_path is None:
                 missing += 1
                 continue
 
-            # Extract storage day from filename prefix (val set naming convention)
-            # e.g. "14_001" → storage_day = 14
-            storage_day = None
-            parts = stem.split("_")
-            try:
-                storage_day = int(parts[0])
-            except (ValueError, IndexError):
-                pass
+            # Extract storage day from filename prefix
+            raw_dates = []
+            for pf in phase_files:
+                stem = pf.stem
+                mask_path = None
+                for ext in [".tif", ".tiff", ".npy", ".png"]:
+                    candidate = self.mask_dir / (stem + ext)
+                    if candidate.exists():
+                        mask_path = candidate
+                        break
 
-            samples.append({
-                "phase_path":  pf,
-                "mask_path":   mask_path,
-                "stem":        stem,
-                "storage_day": storage_day,
-            })
+                if mask_path is None:
+                    missing += 1
+                    continue
+                    
+                try:
+                    raw_dates.append(datetime.strptime(stem.split("_")[0], "%Y%m%d"))
+                except ValueError:
+                    raw_dates.append(None)
+                    
+                samples.append({
+                    "phase_path": pf,
+                    "mask_path": mask_path,
+                    "stem": stem,
+                    "storage_day": None # Will fill in next step
+                })
+
+            # Compute relative days
+            valid_dates = [d for d in raw_dates if d is not None]
+            base_date = min(valid_dates) if valid_dates else None
+
+            for s, d in zip(samples, raw_dates):
+                if d and base_date:
+                    s["storage_day"] = (d - base_date).days
 
         if missing:
             print(f"[QPIDataset] Warning: {missing} phase files had no matching mask.")
@@ -159,7 +198,8 @@ class QPIDataset(Dataset):
             raise RuntimeError(
                 f"No matched phase/mask pairs found.\n"
                 f"  phase_dir: {self.phase_dir}\n"
-                f"  mask_dir:  {self.mask_dir}"
+                f"  mask_dir:  {self.mask_dir}\n"
+                f"  Make sure your image and mask filenames share the same base name!"
             )
         return samples
 
@@ -309,8 +349,31 @@ def get_qpi_loaders(config, num_workers: int = 4):
 
     nw = num_workers if not debug_mode else 0
 
+    # Access the underlying dataset if it's wrapped in a Subset (debug_mode)
+    ds_for_weights = train_ds.dataset if hasattr(train_ds, 'dataset') else train_ds
+
+    # Only use the sampler if we actually have labels to balance
+    if not debug_mode and len(ds_for_weights) > 0 and len(ds_for_weights.labels) > 0:
+        class_counts = torch.zeros(5) # 5 classes
+        for s in ds_for_weights.samples:
+            cls = ds_for_weights.labels.get(s["stem"], 0)
+            class_counts[cls] += 1
+            
+        class_counts = class_counts.clamp(min=1)
+        class_weights = 1.0 / class_counts
+        
+        sample_weights = torch.tensor(
+            [class_weights[ds_for_weights.labels.get(s["stem"], 0)] for s in ds_for_weights.samples]
+        )
+        # len(train_ds) ensures we sample the correct amount if debug_mode modified the length
+        sampler = WeightedRandomSampler(sample_weights, len(train_ds), replacement=True)
+        shuffle = False
+    else:
+        sampler = None
+        shuffle = True
+
     train_loader = DataLoader(
-        train_ds, batch_size=batch_size, shuffle=True,
+        train_ds, batch_size=batch_size, shuffle=shuffle, sampler=sampler,
         num_workers=nw, pin_memory=True, drop_last=True,
     )
     val_loader = DataLoader(

@@ -102,6 +102,7 @@ class MobileSAMSeg(nn.Module):
             in_channels=self.EMBED_DIM, num_classes=num_classes
         )
         self._lora_injected = False
+        self._out_proj = nn.Conv2d(self.EMBED_DIM, num_classes, kernel_size=1)
 
     def _build_encoder(self, pretrained: bool) -> nn.Module:
         try:
@@ -176,8 +177,6 @@ class MobileSAMSeg(nn.Module):
         # Upsample to rough output size
         up = F.interpolate(combined, scale_factor=4, mode="bilinear", align_corners=False)
         # Project to num_classes
-        if not hasattr(self, "_out_proj"):
-            self._out_proj = nn.Conv2d(C, self.num_classes, 1).to(img_emb.device)
         return self._out_proj(up)
 
     def inject_lora(self, r: int = 4, lora_alpha: float = 1.0,
