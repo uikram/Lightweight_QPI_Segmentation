@@ -1,13 +1,18 @@
 """
 Physics-Aware Phase Consistency Loss for QPI segmentation.
 
-L_total = L_Dice + λ1 * L_PMC + λ2 * L_BGA + λ3 * L_PV
+Multi-class biology + binary physics bridge:
 
-Components:
-    L_Dice  – Standard Dice loss for segmentation accuracy
-    L_PMC   – Phase-Mask Contrast: cell phase > background phase
-    L_BGA   – Boundary-Gradient Alignment: seg boundary ↔ phase gradient
-    L_PV    – Phase-Volume Preservation: optical volume consistency
+    L_total = L_CE + λ1 * L_PMC + λ2 * L_BGA + λ3 * L_PV
+
+    L_CE  – CrossEntropyLoss over 5 classes (0=bg, 1-4=cell types)
+    L_PMC – Phase-Mask Contrast: cell phase > background phase
+    L_BGA – Boundary-Gradient Alignment: seg boundary ↔ phase gradient
+    L_PV  – Phase-Volume Preservation: optical volume consistency
+
+Physics losses receive foreground *probability* (already in [0,1]) derived
+from the multi-class softmax output, so they skip the internal sigmoid step
+via the apply_sigmoid=False path.
 """
 
 import torch
@@ -16,31 +21,14 @@ import torch.nn.functional as F
 from typing import Optional
 
 
-class DiceLoss(nn.Module):
-    """
-    Dice loss for binary and multi-class segmentation.
-    L_Dice = 1 - (2 * |P ∩ G|) / (|P| + |G|)
-    """
-
-    def __init__(self, smooth: float = 1e-6):
-        super().__init__()
-        self.smooth = smooth
-
-    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        """
-        pred:   (B, 1, H, W) logits or probabilities
-        target: (B, H, W) binary long tensor
-        """
-        pred_prob = torch.sigmoid(pred).squeeze(1)  # (B, H, W)
-        target_f  = target.float()
-
-        intersection = (pred_prob * target_f).sum(dim=[1, 2])
-        union        = pred_prob.sum(dim=[1, 2]) + target_f.sum(dim=[1, 2])
-
-        dice = (2.0 * intersection + self.smooth) / (union + self.smooth)
-        return 1.0 - dice.mean()
+# ---------------------------------------------------------------------------
+# 5-class weights: [background, discocyte, echinocyte, spherocyte, stomatocyte]
+# Higher weight for rarer / clinically important degradation classes.
+# Indices match dataset pixel values: 0=bg, 1=disco, 2=echino, 3=sphero, 4=stomato
+DEFAULT_CLASS_WEIGHTS = [0.5, 1.0, 1.5, 2.0, 2.0]
 
 
+# ---------------------------------------------------------------------------
 class PhaseMaskContrast(nn.Module):
     """
     Phase-Mask Contrast Loss.
@@ -48,21 +36,24 @@ class PhaseMaskContrast(nn.Module):
     than the surrounding background.
 
     L_PMC = max(0, μ_background - μ_cell + margin)
+
+    apply_sigmoid: set False when pred is already a probability map [0,1].
     """
 
     def __init__(self, margin: float = 0.1):
         super().__init__()
         self.margin = margin
 
-    def forward(self, pred: torch.Tensor, phase_map: torch.Tensor) -> torch.Tensor:
+    def forward(self, pred: torch.Tensor, phase_map: torch.Tensor,
+                apply_sigmoid: bool = True) -> torch.Tensor:
         """
-        pred:      (B, 1, H, W) logits
+        pred:      (B, 1, H, W) logits  OR  foreground probabilities [0,1]
         phase_map: (B, 1, H, W) raw phase values (radians, unnormalized)
         """
-        pred_mask = torch.sigmoid(pred).squeeze(1)  # (B, H, W)
-        phase     = phase_map.squeeze(1)              # (B, H, W)
+        pred_mask = torch.sigmoid(pred).squeeze(1) if apply_sigmoid else pred.squeeze(1)
+        phase     = phase_map.squeeze(1)
 
-        eps = 1e-8
+        eps    = 1e-8
         mu_cell = (pred_mask * phase).sum(dim=[1, 2]) / (pred_mask.sum(dim=[1, 2]) + eps)
         mu_bg   = ((1 - pred_mask) * phase).sum(dim=[1, 2]) / \
                   ((1 - pred_mask).sum(dim=[1, 2]) + eps)
@@ -77,39 +68,32 @@ class BoundaryGradientAlignment(nn.Module):
     Aligns segmentation boundary with strong phase gradients.
 
     L_BGA = ||∇(Mask) - ∇(Phase)||_1
+
+    apply_sigmoid: set False when pred is already a probability map [0,1].
     """
 
     def __init__(self):
         super().__init__()
 
     def _spatial_gradient(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Compute spatial gradient magnitude.
-        x: (B, 1, H, W)
-        Returns: (B, 1, H, W) gradient magnitude
-        """
-        # Sobel-like finite differences
-        dx = x[:, :, :, 1:] - x[:, :, :, :-1]   # (B, 1, H, W-1)
-        dy = x[:, :, 1:, :] - x[:, :, :-1, :]   # (B, 1, H-1, W)
-
-        # Pad to original size
-        dx = F.pad(dx, (0, 1), mode="replicate")  # (B, 1, H, W)
-        dy = F.pad(dy, (0, 0, 0, 1), mode="replicate")  # (B, 1, H, W)
-
+        dx = x[:, :, :, 1:] - x[:, :, :, :-1]
+        dy = x[:, :, 1:, :] - x[:, :, :-1, :]
+        dx = F.pad(dx, (0, 1), mode="replicate")
+        dy = F.pad(dy, (0, 0, 0, 1), mode="replicate")
         return torch.sqrt(dx ** 2 + dy ** 2 + 1e-8)
 
-    def forward(self, pred: torch.Tensor, phase_map: torch.Tensor) -> torch.Tensor:
+    def forward(self, pred: torch.Tensor, phase_map: torch.Tensor,
+                apply_sigmoid: bool = True) -> torch.Tensor:
         """
-        pred:      (B, 1, H, W) logits
+        pred:      (B, 1, H, W) logits  OR  foreground probabilities [0,1]
         phase_map: (B, 1, H, W) raw phase values
         """
-        pred_prob = torch.sigmoid(pred)  # (B, 1, H, W)
+        pred_prob = torch.sigmoid(pred) if apply_sigmoid else pred
 
         grad_mask  = self._spatial_gradient(pred_prob)
         grad_phase = self._spatial_gradient(phase_map)
 
-        # Normalize phase gradient to [0, 1] for scale invariance
-        grad_phase_max = grad_phase.amax(dim=[2, 3], keepdim=True).clamp(min=1e-8)
+        grad_phase_max  = grad_phase.amax(dim=[2, 3], keepdim=True).clamp(min=1e-8)
         grad_phase_norm = grad_phase / grad_phase_max
 
         return F.l1_loss(grad_mask, grad_phase_norm)
@@ -121,7 +105,9 @@ class PhaseVolumePreservation(nn.Module):
     Ensures the phase-integrated optical quantity (dry mass proxy)
     is preserved between predicted and ground-truth masks.
 
-    L_PV = |Σ_{pred}(Phase) - Σ_{GT}(Phase)|
+    L_PV = |Σ_{pred}(Phase) - Σ_{GT}(Phase)| / |Σ_{GT}(Phase)|
+
+    apply_sigmoid: set False when pred is already a probability map [0,1].
     """
 
     def __init__(self, normalize: bool = True):
@@ -129,21 +115,21 @@ class PhaseVolumePreservation(nn.Module):
         self.normalize = normalize
 
     def forward(self, pred: torch.Tensor, target: torch.Tensor,
-                phase_map: torch.Tensor) -> torch.Tensor:
+                phase_map: torch.Tensor,
+                apply_sigmoid: bool = True) -> torch.Tensor:
         """
-        pred:      (B, 1, H, W) logits
-        target:    (B, H, W) binary long tensor
+        pred:      (B, 1, H, W) logits  OR  foreground probabilities [0,1]
+        target:    (B, H, W) binary long tensor  (cell vs background)
         phase_map: (B, 1, H, W) raw phase values
         """
-        pred_prob = torch.sigmoid(pred).squeeze(1)  # (B, H, W)
+        pred_prob = torch.sigmoid(pred).squeeze(1) if apply_sigmoid else pred.squeeze(1)
         target_f  = target.float()
-        phase     = phase_map.squeeze(1)             # (B, H, W)
+        phase     = phase_map.squeeze(1)
 
         pred_vol = (pred_prob * phase).sum(dim=[1, 2])
         gt_vol   = (target_f  * phase).sum(dim=[1, 2])
 
         if self.normalize:
-            # Normalize by GT volume for scale invariance
             gt_vol_norm = gt_vol.abs().clamp(min=1e-8)
             loss = (torch.abs(pred_vol - gt_vol) / gt_vol_norm).mean()
         else:
@@ -152,123 +138,140 @@ class PhaseVolumePreservation(nn.Module):
         return loss
 
 
+# ---------------------------------------------------------------------------
 class PhysicsAwarePhaseLoss(nn.Module):
     """
-    Combined Physics-Aware Phase Consistency Loss.
+    Combined Physics-Aware Phase Consistency Loss for multi-class QPI.
 
-    L_total = L_Dice + λ1 * L_PMC + λ2 * L_BGA + λ3 * L_PV
+    L_total = L_CE + λ1 * L_PMC + λ2 * L_BGA + λ3 * L_PV
 
-    Also includes optional Binary Cross-Entropy for training stability.
+    The CrossEntropyLoss handles the 5-class biological classification.
+    Physics losses (PMC, BGA, PV) operate on foreground probability
+    (cell vs background) derived from the softmax output, so they receive
+    already-computed probabilities and skip the internal sigmoid step.
     """
 
     def __init__(self,
-                 lambda1: float = 0.1,   # PMC weight
-                 lambda2: float = 0.05,  # BGA weight
-                 lambda3: float = 0.1,   # PV weight
-                 bce_weight: float = 0.5,
+                 lambda1: float = 0.1,
+                 lambda2: float = 0.05,
+                 lambda3: float = 0.1,
                  pmc_margin: float = 0.1,
-                 pv_normalize: bool = True):
+                 pv_normalize: bool = True,
+                 class_weights: Optional[list] = None):
         super().__init__()
-        self.lambda1    = lambda1
-        self.lambda2    = lambda2
-        self.lambda3    = lambda3
-        self.bce_weight = bce_weight
+        self.lambda1 = lambda1
+        self.lambda2 = lambda2
+        self.lambda3 = lambda3
 
-        self.dice_loss  = DiceLoss()
-        self.pmc_loss   = PhaseMaskContrast(margin=pmc_margin)
-        self.bga_loss   = BoundaryGradientAlignment()
-        self.pv_loss    = PhaseVolumePreservation(normalize=pv_normalize)
-        self.bce_loss   = nn.BCEWithLogitsLoss()
+        # CrossEntropyLoss for 5-class biology
+        weights = class_weights if class_weights is not None else DEFAULT_CLASS_WEIGHTS
+        weight_tensor = torch.tensor(weights, dtype=torch.float32)
+        self.ce_loss = nn.CrossEntropyLoss(weight=weight_tensor)
+
+        self.pmc_loss = PhaseMaskContrast(margin=pmc_margin)
+        self.bga_loss = BoundaryGradientAlignment()
+        self.pv_loss  = PhaseVolumePreservation(normalize=pv_normalize)
 
     def forward(self,
                 pred: torch.Tensor,
                 target: torch.Tensor,
                 phase_map: torch.Tensor) -> torch.Tensor:
         """
-        Args:
-            pred:      (B, 1, H, W) raw logits from segmentation model
-            target:    (B, H, W) binary ground-truth mask (long)
-            phase_map: (B, 1, H, W) raw (unnormalized) phase values
+        pred:      (B, num_classes, H, W) raw logits from segmentation model
+        target:    (B, H, W) integer class labels 0–4
+        phase_map: (B, 1, H, W) raw (unnormalized) phase values
 
-        Returns:
-            Scalar loss tensor.
+        The CrossEntropyLoss weight tensor must be on the same device as pred.
         """
-        target_f = target.float().unsqueeze(1)  # (B, 1, H, W)
+        # Move CE weight to device on first forward pass
+        if self.ce_loss.weight is not None and \
+           self.ce_loss.weight.device != pred.device:
+            self.ce_loss.weight = self.ce_loss.weight.to(pred.device)
 
-        L_dice = self.dice_loss(pred, target)
-        L_bce  = self.bce_loss(pred, target_f)
-        L_pmc  = self.pmc_loss(pred, phase_map)
-        L_bga  = self.bga_loss(pred, phase_map)
-        L_pv   = self.pv_loss(pred, target, phase_map)
+        # 1. Biological classification loss (uses full 0-4 labels)
+        L_ce = self.ce_loss(pred, target)
 
-        L_seg   = (1 - self.bce_weight) * L_dice + self.bce_weight * L_bce
-        L_total = L_seg + self.lambda1 * L_pmc + self.lambda2 * L_bga + self.lambda3 * L_pv
+        # 2. Derive foreground probability for physics losses.
+        #    P(cell) = 1 - P(background) = 1 - softmax(pred)[:,0]
+        pred_softmax   = torch.softmax(pred, dim=1)
+        pred_fg_prob   = 1.0 - pred_softmax[:, 0:1, :, :]  # (B, 1, H, W)
 
-        return L_total
+        # 3. Binary target for physics losses (cell vs background)
+        target_binary = (target > 0).long()                 # (B, H, W)
+
+        # 4. Physics losses — pass_sigmoid=False because pred_fg_prob
+        #    is already a probability in [0, 1].
+        L_pmc = self.pmc_loss(pred_fg_prob, phase_map,               apply_sigmoid=False)
+        L_bga = self.bga_loss(pred_fg_prob, phase_map,               apply_sigmoid=False)
+        L_pv  = self.pv_loss( pred_fg_prob, target_binary, phase_map, apply_sigmoid=False)
+
+        return L_ce + self.lambda1 * L_pmc + self.lambda2 * L_bga + self.lambda3 * L_pv
 
     def get_loss_components(self,
                             pred: torch.Tensor,
                             target: torch.Tensor,
                             phase_map: torch.Tensor) -> dict:
-        """Return individual loss components for logging/ablation."""
-        target_f = target.float().unsqueeze(1)
+        """Return individual loss component values for logging/ablation."""
+        if self.ce_loss.weight is not None and \
+           self.ce_loss.weight.device != pred.device:
+            self.ce_loss.weight = self.ce_loss.weight.to(pred.device)
 
         with torch.no_grad():
-            L_dice = self.dice_loss(pred, target).item()
-            L_bce  = self.bce_loss(pred, target_f).item()
-            L_pmc  = self.pmc_loss(pred, phase_map).item()
-            L_bga  = self.bga_loss(pred, phase_map).item()
-            L_pv   = self.pv_loss(pred, target, phase_map).item()
+            pred_softmax = torch.softmax(pred, dim=1)
+            pred_fg_prob = 1.0 - pred_softmax[:, 0:1, :, :]
+            target_binary = (target > 0).long()
+
+            L_ce  = self.ce_loss(pred, target).item()
+            L_pmc = self.pmc_loss(pred_fg_prob, phase_map, apply_sigmoid=False).item()
+            L_bga = self.bga_loss(pred_fg_prob, phase_map, apply_sigmoid=False).item()
+            L_pv  = self.pv_loss(pred_fg_prob, target_binary, phase_map,
+                                 apply_sigmoid=False).item()
 
         return {
-            "L_dice": L_dice,
-            "L_bce":  L_bce,
+            "L_ce":   L_ce,
             "L_pmc":  L_pmc,
             "L_bga":  L_bga,
             "L_pv":   L_pv,
-            "L_total": (
-                (1 - self.bce_weight) * L_dice +
-                self.bce_weight * L_bce +
-                self.lambda1 * L_pmc +
-                self.lambda2 * L_bga +
-                self.lambda3 * L_pv
-            ),
+            "L_total": L_ce + self.lambda1 * L_pmc + self.lambda2 * L_bga + self.lambda3 * L_pv,
         }
 
 
+# ---------------------------------------------------------------------------
 class DiceOnlyLoss(nn.Module):
     """
-    Ablation baseline: Dice + BCE only, no physics terms.
+    Ablation baseline: CrossEntropyLoss only, no physics terms.
     Used in ablation study (Section 4.5).
     """
 
-    def __init__(self, bce_weight: float = 0.5):
+    def __init__(self, class_weights: Optional[list] = None):
         super().__init__()
-        self.bce_weight = bce_weight
-        self.dice_loss  = DiceLoss()
-        self.bce_loss   = nn.BCEWithLogitsLoss()
+        weights = class_weights if class_weights is not None else DEFAULT_CLASS_WEIGHTS
+        self.ce_loss = nn.CrossEntropyLoss(
+            weight=torch.tensor(weights, dtype=torch.float32)
+        )
 
     def forward(self, pred, target, phase_map=None):
-        target_f = target.float().unsqueeze(1)
-        L_dice   = self.dice_loss(pred, target)
-        L_bce    = self.bce_loss(pred, target_f)
-        return (1 - self.bce_weight) * L_dice + self.bce_weight * L_bce
+        if self.ce_loss.weight is not None and \
+           self.ce_loss.weight.device != pred.device:
+            self.ce_loss.weight = self.ce_loss.weight.to(pred.device)
+        return self.ce_loss(pred, target)
 
 
+# ---------------------------------------------------------------------------
 def get_loss(config) -> nn.Module:
     """Loss factory based on config."""
     loss_type = getattr(config, "loss_type", "physics_aware")
 
     if loss_type == "physics_aware":
         return PhysicsAwarePhaseLoss(
-            lambda1=getattr(config, "lambda_pmc", 0.1),
-            lambda2=getattr(config, "lambda_bga", 0.05),
-            lambda3=getattr(config, "lambda_pv",  0.1),
-            bce_weight=getattr(config, "bce_weight", 0.5),
+            lambda1=getattr(config, "lambda1_pmc", 0.1),
+            lambda2=getattr(config, "lambda2_bga", 0.05),
+            lambda3=getattr(config, "lambda3_pv",  0.1),
             pmc_margin=getattr(config, "pmc_margin", 0.1),
         )
     elif loss_type == "dice_only":
-        return DiceOnlyLoss(bce_weight=getattr(config, "bce_weight", 0.5))
+        return DiceOnlyLoss()
     else:
-        raise ValueError(f"Unknown loss type: {loss_type}. "
-                         f"Choose from: physics_aware, dice_only")
+        raise ValueError(
+            f"Unknown loss type: '{loss_type}'. Choose from: physics_aware, dice_only"
+        )

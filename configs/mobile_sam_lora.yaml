@@ -1,20 +1,22 @@
 experiment_name: "mobile_sam_lora_qpi"
 
+data_root: "./dataset"
+
 dataset:
-  phase_dir: "data/qpi/train/phase"
-  mask_dir: "data/qpi/train/mask"
   batch_size: 8
   num_workers: 4
+  image_size: 512          # MobileSAM internal resize target — must match model default
 
 model:
   architecture: "mobile_sam"
   in_channels: 1
-  num_classes: 1
+  num_classes: 5
 
 lora:
-  rank_sweep: [2, 4, 8, 16]
+  lora_r: 8
+  lora_alpha: 8.0
+  lora_dropout: 0.0
   insertion_strategy: "attention_blocks"
-  target_modules: ["attention.*.q_proj", "attention.*.v_proj"]
 
 training:
   epochs: 50
@@ -26,3 +28,6 @@ loss_weights:
   lambda1_pmc: 0.1
   lambda2_bga: 0.05
   lambda3_pv: 0.1
+
+results_dir: "results/mobile_sam_lora"
+checkpoint_dir: "results/mobile_sam_lora/checkpoints"
