@@ -1,9 +1,10 @@
 """
 Main Entry Point for Holographic AI Framework.
-Strictly separates Training and Evaluation modes.
+Strictly separates Training, Evaluation, and Rank Sweep modes.
 """
 import argparse
 import os
+import gc
 import torch
 import warnings
 from pathlib import Path
@@ -14,27 +15,37 @@ warnings.filterwarnings("ignore")
 from datasets.qpi_dataset import get_qpi_loaders
 from models import get_model
 from training.trainer_seg import SegmentationTrainer
-from evaluation.evaluate import SegmentationEvaluator  # FIXED: Corrected import
+from evaluation.evaluate import SegmentationEvaluator
 from evaluation.metrics import MetricsTracker
 from utils.helpers import seed_everything
 from utils.config import load_config_from_yaml
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Physics-Aware QPI Segmentation Models")
-    # FIXED: Removed 'benchmark' from choices
-    parser.add_argument('--mode', type=str, required=True, choices=['train', 'evaluate'])
+    # Added 'sweep' to the allowed modes
+    parser.add_argument('--mode', type=str, required=True, choices=['train', 'evaluate', 'sweep'])
     parser.add_argument('--config', type=str, required=True, help="Path to config yaml")
     parser.add_argument('--gpu', type=int, default=0)
     parser.add_argument('--seed', type=int, default=42)
+    # Added ranks argument specifically for the sweep mode
+    parser.add_argument('--ranks', type=int, nargs='+', default=[2, 4, 8, 16], help="List of LoRA ranks to sweep")
     return parser.parse_args()
 
-def init_environment(args):
+def init_environment(args, override_rank=None):
     """Setup config, device, data, and model."""
     config = load_config_from_yaml(args.config)
     config.device = f"cuda:{args.gpu}" if torch.cuda.is_available() else "cpu"
     seed_everything(args.seed)
     
-    print(f"Initializing {config.architecture.upper()}")
+    # If sweeping, dynamically override the rank and directories in memory
+    if override_rank is not None:
+        config.lora_r = override_rank
+        base_dir = getattr(config, 'results_dir', Path('results'))
+        # Create separate output folders for each rank (e.g., results_dir_r8)
+        config.results_dir = Path(f"{str(base_dir)}_r{override_rank}")
+        config.checkpoint_dir = config.results_dir / "checkpoints"
+        
+    print(f"Initializing {config.architecture.upper()} (LoRA r={getattr(config, 'lora_r', 'None')})")
     model = get_model(config.architecture, config)
     model.to(config.device)
     
@@ -43,7 +54,6 @@ def init_environment(args):
 def run_train(args):
     model, config = init_environment(args)
     
-    # Use built-in factory to get data loaders
     train_loader, val_loader, _ = get_qpi_loaders(config, num_workers=config.num_workers)
     metrics_tracker = MetricsTracker(config.architecture, config.results_dir)
     
@@ -59,7 +69,6 @@ def run_train(args):
 def run_evaluate(args):
     model, config = init_environment(args)
     
-    # Load best weights
     best_model_path = config.checkpoint_dir / "best_model.pt"
     if best_model_path.exists():
         ckpt = torch.load(best_model_path, map_location=config.device)
@@ -83,10 +92,47 @@ def run_evaluate(args):
     for k, v in metrics.items():
         print(f"  {k}: {v:.4f}")
 
+def run_sweep(args):
+    """Executes the systematic evaluation of different LoRA ranks sequentially."""
+    print(f"\n{'='*50}\nSTARTING LORA RANK SWEEP: {args.ranks}\n{'='*50}")
+    
+    for r in args.ranks:
+        print(f"\n\n>>>>> TRAINING WITH LORA RANK: {r} <<<<<")
+        
+        # Initialize everything with the overridden rank
+        model, config = init_environment(args, override_rank=r)
+        
+        train_loader, val_loader, _ = get_qpi_loaders(config, num_workers=config.num_workers)
+        
+        # Keep metrics namespaced to avoid overwriting
+        metrics_tracker = MetricsTracker(f"{config.architecture}_r{r}", config.results_dir)
+        
+        trainer = SegmentationTrainer(
+            model=model, 
+            config=config,
+            metrics_tracker=metrics_tracker
+        )
+        
+        # Run training
+        trainer.train()
+        print(f"Finished training for rank {r}.")
+        
+        # Critical: Free up GPU memory before starting the next rank
+        del model
+        del trainer
+        del train_loader
+        del val_loader
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            
+    print(f"\n{'='*50}\nRANK SWEEP COMPLETE\n{'='*50}")
+
 def main():
     args = parse_args()
     if args.mode == 'train': run_train(args)
     elif args.mode == 'evaluate': run_evaluate(args)
+    elif args.mode == 'sweep': run_sweep(args)
 
 if __name__ == "__main__":
     main()
