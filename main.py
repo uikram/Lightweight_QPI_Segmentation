@@ -105,9 +105,6 @@ def run_sweep(args):
         metrics_tracker = MetricsTracker(f"{config.architecture}_r{r}", config.results_dir)
         trainer = SegmentationTrainer(model, config, metrics_tracker)
         trainer.train()
-        
-        # Run training
-        trainer.train()
         print(f"Finished training for rank {r}.")
         
         # Critical: Free up GPU memory before starting the next rank

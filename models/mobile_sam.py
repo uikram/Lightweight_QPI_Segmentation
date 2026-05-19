@@ -46,34 +46,22 @@ class LightweightMaskDecoder(nn.Module):
             dropout=0.0, batch_first=True
         )
 
-        self.upscale = nn.Sequential(
-            nn.ConvTranspose2d(in_channels, in_channels // 4, kernel_size=2, stride=2),
-            nn.LayerNorm([in_channels // 4, 1, 1]),  # placeholder, corrected in forward
-            nn.GELU(),
-            nn.ConvTranspose2d(in_channels // 4, in_channels // 8, kernel_size=2, stride=2),
-            nn.GELU(),
-        )
-
-        self.output_conv = nn.Conv2d(in_channels // 8, num_classes, kernel_size=1)
-
     def forward(self, image_embeddings: torch.Tensor,
                 prompt_embeddings: torch.Tensor) -> torch.Tensor:
         B, C, H, W = image_embeddings.shape
-
+        
         # Flatten spatial dims for transformer
         img_seq = image_embeddings.flatten(2).permute(0, 2, 1)  # (B, HW, C)
-
         mask_tok = self.mask_tokens.weight.unsqueeze(0).expand(B, -1, -1)
-        out = self.transformer(mask_tok, img_seq)                # (B, num_cls, C)
-
-        # Reshape back and decode
-        upscaled = self.upscale_from_embeddings(image_embeddings)
-        logits   = (out @ upscaled.flatten(2)).view(B, -1, H * 4, W * 4)
+        
+        out = self.transformer(mask_tok, img_seq)  # (B, num_classes, C)
+        
+        upscaled = F.interpolate(image_embeddings, scale_factor=4,
+                                 mode="bilinear", align_corners=False)  # (B, C, 4H, 4W)
+        
+        # Project each spatial position using class token weights
+        logits = torch.einsum('bnc,bchw->bnhw', out, upscaled)  # (B, num_classes, 4H, 4W)
         return logits
-
-    def upscale_from_embeddings(self, x):
-        x = F.interpolate(x, scale_factor=4, mode="bilinear", align_corners=False)
-        return x
 
 
 class MobileSAMSeg(nn.Module):
@@ -102,7 +90,6 @@ class MobileSAMSeg(nn.Module):
             in_channels=self.EMBED_DIM, num_classes=num_classes
         )
         self._lora_injected = False
-        self._out_proj = nn.Conv2d(self.EMBED_DIM, num_classes, kernel_size=1)
 
     def _build_encoder(self, pretrained: bool) -> nn.Module:
         try:
@@ -160,24 +147,15 @@ class MobileSAMSeg(nn.Module):
 
         prompt_emb = self.prompt_encoder(B, x.device)
 
-        # Simple decoder: project and upsample
+        # Decode using the Lightweight Mask Decoder
+        decoded = self.mask_decoder(img_emb, prompt_emb)
         logits = F.interpolate(
-            self._decode(img_emb),
+            decoded,
             size=x.shape[2:],
             mode="bilinear",
             align_corners=False,
         )
         return logits
-
-    def _decode(self, img_emb: torch.Tensor) -> torch.Tensor:
-        B, C, H, W = img_emb.shape
-        proj = nn.functional.adaptive_avg_pool2d(img_emb, 1)  # (B, C, 1, 1)
-        proj = proj.expand(-1, -1, H, W)
-        combined = img_emb + proj
-        # Upsample to rough output size
-        up = F.interpolate(combined, scale_factor=4, mode="bilinear", align_corners=False)
-        # Project to num_classes
-        return self._out_proj(up)
 
     def inject_lora(self, r: int = 4, lora_alpha: float = 1.0,
                     lora_dropout: float = 0.0, strategy: str = "attention_blocks"):
