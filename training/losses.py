@@ -165,7 +165,7 @@ class PhysicsAwarePhaseLoss(nn.Module):
 
         # CrossEntropyLoss for 5-class biology
         weights = class_weights if class_weights is not None else DEFAULT_CLASS_WEIGHTS
-        weight_tensor = torch.tensor(weights, dtype=torch.float32)
+        weight_tensor = torch.tensor(class_weights, dtype=torch.float32) if class_weights else None
         self.ce_loss = nn.CrossEntropyLoss(weight=weight_tensor)
 
         self.pmc_loss = PhaseMaskContrast(margin=pmc_margin)

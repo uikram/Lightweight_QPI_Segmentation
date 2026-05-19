@@ -266,13 +266,11 @@ class QPIDataset(Dataset):
         if self.image_size is not None:
             phase, mask = self._resize(phase, mask)
 
-        # Raw phase before augmentation — used by physics-aware loss
-        phase_raw = torch.from_numpy(phase.copy()).unsqueeze(0)   # (1, H, W)
-
         phase_t = torch.from_numpy(phase).unsqueeze(0)            # (1, H, W)
         mask_t  = torch.from_numpy(mask).long()                   # (H, W)
 
-        phase_t, mask_t = self.transform(phase_t, mask_t)
+        # FIX: Receive phase_raw directly from the transform pipeline
+        phase_t, mask_t, phase_raw = self.transform(phase_t, mask_t)
 
         morphology_class = self.labels.get(sample["stem"], 0)
         storage_day      = sample["storage_day"] if sample["storage_day"] is not None else -1
@@ -349,6 +347,11 @@ def get_qpi_loaders(config, num_workers: int = 4):
     print(f"[QPIDataLoader] Train: {len(train_loader)} batches | "
           f"Val: {len(val_loader)} batches")
 
-    # Val set serves as test set per dataset specification.
-    # Returning None for test_loader so existing main.py logic is unaffected.
-    return train_loader, val_loader, None
+    try:
+        test_ds = QPIDataset(data_root, split="test", image_size=image_size, augment=False)
+        test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False, num_workers=nw)
+    except FileNotFoundError:
+        print("[QPIDataLoader] No X_test/Y_test found. Defaulting test_loader to val_loader.")
+        test_loader = val_loader
+
+    return train_loader, val_loader, test_loader

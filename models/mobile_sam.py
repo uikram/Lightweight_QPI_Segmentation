@@ -67,22 +67,17 @@ class LightweightMaskDecoder(nn.Module):
 class MobileSAMSeg(nn.Module):
     """
     MobileSAM-based segmentation model for single-channel QPI.
-
-    Attempts to load the official MobileSAM TinyViT encoder.
-    Falls back to a lightweight CNN encoder if mobile_sam package
-    is not installed.
-
-    Input:  (B, 1, H, W)  – single-channel phase map
-    Output: (B, num_classes, H, W) – segmentation logits
     """
 
     EMBED_DIM = 256
 
     def __init__(self, num_classes: int = 1, pretrained: bool = True,
-                 image_size: int = 512):
+                 image_size: int = 512): # You can keep this arg to not break get_model
         super().__init__()
         self.num_classes = num_classes
-        self.image_size  = image_size
+        
+        # FIX: TinyViT strictly requires 1024x1024
+        self.encoder_input_size = 1024  
 
         self.encoder = self._build_encoder(pretrained)
         self.prompt_encoder  = QPIPromptEncoder(embed_dim=self.EMBED_DIM)
@@ -149,25 +144,30 @@ class MobileSAMSeg(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B = x.shape[0]
+        orig_size = x.shape[2:]  # Save original dimensions
 
-        # Resize to expected image size if needed
-        if x.shape[-1] != self.image_size:
-            x = F.interpolate(x, size=(self.image_size, self.image_size),
-                              mode="bilinear", align_corners=False)
+        # FIX: Resize strictly to the 1024x1024 expectation for TinyViT
+        if x.shape[-1] != self.encoder_input_size:
+            x_enc = F.interpolate(x, size=(self.encoder_input_size, self.encoder_input_size),
+                                  mode="bilinear", align_corners=False)
+        else:
+            x_enc = x
 
-        img_emb = self.encoder(x)
+        img_emb = self.encoder(x_enc)
 
-        # Handle TinyViT output shape (B, H, W, C) → (B, C, H, W)
-        if img_emb.dim() == 4 and img_emb.shape[-1] != img_emb.shape[1]:
+        # FIX: Check if the last dimension is specifically the EMBED_DIM (256)
+        if img_emb.dim() == 4 and img_emb.shape[-1] == self.EMBED_DIM:
             img_emb = img_emb.permute(0, 3, 1, 2)
 
         prompt_emb = self.prompt_encoder(B, x.device)
 
         # Decode using the Lightweight Mask Decoder
         decoded = self.mask_decoder(img_emb, prompt_emb)
+        
+        # Restore back to original dataset resolution (e.g., 512x512)
         logits = F.interpolate(
             decoded,
-            size=x.shape[2:],
+            size=orig_size,
             mode="bilinear",
             align_corners=False,
         )
@@ -189,12 +189,15 @@ class MobileSAMSeg(nn.Module):
 
     def encode_image(self, x: torch.Tensor) -> torch.Tensor:
         """Feature extraction for evaluation."""
-        if x.shape[-1] != self.image_size:
-            x = F.interpolate(x, size=(self.image_size, self.image_size),
+        if x.shape[-1] != self.encoder_input_size:
+            x = F.interpolate(x, size=(self.encoder_input_size, self.encoder_input_size),
                               mode="bilinear", align_corners=False)
         img_emb = self.encoder(x)
-        if img_emb.dim() == 4 and img_emb.shape[-1] != img_emb.shape[1]:
+        
+        # FIX: Apply the same corrected check here
+        if img_emb.dim() == 4 and img_emb.shape[-1] == self.EMBED_DIM:
             img_emb = img_emb.permute(0, 3, 1, 2)
+            
         return img_emb.mean(dim=[2, 3])
 
     def count_parameters(self):

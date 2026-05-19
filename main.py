@@ -80,15 +80,18 @@ def run_evaluate(args):
         
     model.eval()
     
-    _, val_loader, _ = get_qpi_loaders(config, num_workers=config.num_workers)
-    if val_loader is None:
-        print("No validation/test dataset found. Aborting evaluation.")
+    # FIX: Extract the test_loader (3rd element) instead of val_loader
+    _, _, test_loader = get_qpi_loaders(config, num_workers=config.num_workers)
+    
+    if test_loader is None:
+        print("No test dataset found. Aborting evaluation.")
         return
         
     evaluator = SegmentationEvaluator(model, config)
     
     print(f"\n{'='*40}\nSTARTING EVALUATION\n{'='*40}")
-    metrics = evaluator.evaluate(val_loader)
+    # FIX: Evaluate strictly on the test set
+    metrics = evaluator.evaluate(test_loader)
     print("\nEvaluation Complete. Results:")
     for k, v in metrics.items():
         print(f"  {k}: {v:.4f}")

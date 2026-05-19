@@ -209,22 +209,22 @@ class QPIAugmentation:
         self.normalizer = PhaseNormalization() if normalize else None
 
     def __call__(self, phase: torch.Tensor,
-                 mask: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+                 mask: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         for t in self.transforms:
             phase, mask = t(phase, mask)
+        
+        # FIX: Capture the spatially augmented phase before normalization
+        phase_raw = phase.clone() 
+        
         if self.normalizer is not None:
             phase = self.normalizer(phase)
-        return phase, mask
-
+        return phase, mask, phase_raw
 
 class QPIValTransform:
-    """
-    Validation transform: normalization only, no augmentation.
-    """
-
     def __init__(self):
         self.normalizer = PhaseNormalization()
 
     def __call__(self, phase: torch.Tensor,
-                 mask: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        return self.normalizer(phase), mask
+                 mask: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        phase_raw = phase.clone()
+        return self.normalizer(phase), mask, phase_raw
