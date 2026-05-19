@@ -4,6 +4,7 @@ Strictly separates Training, Evaluation, and Rank Sweep modes.
 """
 import argparse
 import os
+os.environ["TORCH_HOME"] = os.path.join(os.path.dirname(__file__), "cache")
 import gc
 import torch
 import warnings
@@ -101,17 +102,9 @@ def run_sweep(args):
         
         # Initialize everything with the overridden rank
         model, config = init_environment(args, override_rank=r)
-        
-        train_loader, val_loader, _ = get_qpi_loaders(config, num_workers=config.num_workers)
-        
-        # Keep metrics namespaced to avoid overwriting
         metrics_tracker = MetricsTracker(f"{config.architecture}_r{r}", config.results_dir)
-        
-        trainer = SegmentationTrainer(
-            model=model, 
-            config=config,
-            metrics_tracker=metrics_tracker
-        )
+        trainer = SegmentationTrainer(model, config, metrics_tracker)
+        trainer.train()
         
         # Run training
         trainer.train()
@@ -120,8 +113,6 @@ def run_sweep(args):
         # Critical: Free up GPU memory before starting the next rank
         del model
         del trainer
-        del train_loader
-        del val_loader
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()

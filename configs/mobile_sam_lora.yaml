@@ -1,5 +1,7 @@
 experiment_name: "mobile_sam_lora_qpi"
 
+cache_dir: "./cache"
+
 data_root: "./dataset"
 
 dataset:

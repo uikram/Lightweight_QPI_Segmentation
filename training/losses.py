@@ -78,8 +78,8 @@ class BoundaryGradientAlignment(nn.Module):
     def _spatial_gradient(self, x: torch.Tensor) -> torch.Tensor:
         dx = x[:, :, :, 1:] - x[:, :, :, :-1]
         dy = x[:, :, 1:, :] - x[:, :, :-1, :]
-        dx = F.pad(dx, (0, 1), mode="replicate")
-        dy = F.pad(dy, (0, 0, 0, 1), mode="replicate")
+        dx = F.pad(dx, (0, 1), mode="constant", value=0.0)
+        dy = F.pad(dy, (0, 0, 0, 1), mode="constant", value=0.0)
         return torch.sqrt(dx ** 2 + dy ** 2 + 1e-8)
 
     def forward(self, pred: torch.Tensor, phase_map: torch.Tensor,

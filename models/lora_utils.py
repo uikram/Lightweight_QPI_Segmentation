@@ -192,7 +192,7 @@ def inject_lora_into_model(
             setattr(parent, attr, lora_layer)
             replacements += 1
 
-        elif should_inject and isinstance(module, nn.Conv2d) and strategy == "bottleneck":
+        elif should_inject and isinstance(module, nn.Conv2d) and strategy in ("bottleneck", "encoder_only"):
             parent, attr = _get_parent_and_attr(model, name)
             lora_layer = LoRAConv2d.from_conv2d(module, r=r, lora_alpha=lora_alpha,
                                                 lora_dropout=lora_dropout)
@@ -220,7 +220,9 @@ def _should_inject(name: str, module: nn.Module, strategy: str,
         return any(t in name for t in target_names)
 
     if strategy == "encoder_only":
-        return "encoder" in name and isinstance(module, nn.Linear)
+        if isinstance(module, nn.Conv2d) and module.groups > 1:
+            return False
+        return "enc" in name and isinstance(module, (nn.Linear, nn.Conv2d))
 
     if strategy == "attention_blocks":
         attention_keywords = ["q_proj", "v_proj", "query", "value",

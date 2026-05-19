@@ -99,9 +99,7 @@ class QPIDataset(Dataset):
 
         # labels.csv is optional — falls back to empty dict gracefully
         label_file    = self.data_root / f"labels_{split}.csv"
-        self.labels   = self._load_labels(label_file) if label_file.exists() else {}
-        if not self.labels:
-            print(f"[QPIDataset] No labels CSV found. morphology_class defaults to 0.")
+        self.labels = self._load_labels(label_file) if label_file.exists() else {}
 
         # ── Transforms ────────────────────────────────────────────────────────
         if augment and split == "train":
@@ -117,7 +115,6 @@ class QPIDataset(Dataset):
 
     # ── Sample collection ─────────────────────────────────────────────────────
     def _collect_samples(self) -> List[Dict]:
-        # Search for both lowercase and uppercase phase map extensions
         phase_files = sorted(
             list(self.phase_dir.glob("*.tif")) +
             list(self.phase_dir.glob("*.tiff")) +
@@ -126,26 +123,17 @@ class QPIDataset(Dataset):
             list(self.phase_dir.glob("*.npy"))
         )
 
-        samples = []
-        missing = 0
+        samples   = []
+        raw_dates = []
+        missing   = 0
 
-        for pf in phase_files:
+        for pf in phase_files:          # ← single flat loop, no nesting
             stem = pf.stem
             mask_path = None
-            
-            # Look for exact match, or common mask prefixes/suffixes
-            possible_stems = [
-                stem,
-                f"mask_{stem}",
-                f"{stem}_mask",
-                f"output_mask_{stem}",
-                stem.replace("image", "mask"),
-                stem.replace("image", "output_mask")
-            ]
-            
+            possible_stems = [stem, f"mask_{stem}", f"{stem}_mask",
+                            stem.replace("image", "mask")]
             for p_stem in possible_stems:
-                # ADDED: Uppercase .TIFF, .TIF, .PNG to handle Linux case-sensitivity
-                for ext in [".tif", ".tiff", ".npy", ".png", ".TIFF", ".TIF", ".PNG"]:
+                for ext in [".tif", ".tiff", ".npy", ".png", ".TIF", ".TIFF", ".PNG"]:
                     candidate = self.mask_dir / (p_stem + ext)
                     if candidate.exists():
                         mask_path = candidate
@@ -157,50 +145,27 @@ class QPIDataset(Dataset):
                 missing += 1
                 continue
 
-            # Extract storage day from filename prefix
-            raw_dates = []
-            for pf in phase_files:
-                stem = pf.stem
-                mask_path = None
-                for ext in [".tif", ".tiff", ".npy", ".png"]:
-                    candidate = self.mask_dir / (stem + ext)
-                    if candidate.exists():
-                        mask_path = candidate
-                        break
+            try:
+                raw_dates.append(datetime.strptime(stem.split("_")[0], "%Y%m%d"))
+            except ValueError:
+                raw_dates.append(None)
 
-                if mask_path is None:
-                    missing += 1
-                    continue
-                    
-                try:
-                    raw_dates.append(datetime.strptime(stem.split("_")[0], "%Y%m%d"))
-                except ValueError:
-                    raw_dates.append(None)
-                    
-                samples.append({
-                    "phase_path": pf,
-                    "mask_path": mask_path,
-                    "stem": stem,
-                    "storage_day": None # Will fill in next step
-                })
+            samples.append({"phase_path": pf, "mask_path": mask_path,
+                            "stem": stem, "storage_day": None})
 
-            # Compute relative days
-            valid_dates = [d for d in raw_dates if d is not None]
-            base_date = min(valid_dates) if valid_dates else None
-
-            for s, d in zip(samples, raw_dates):
-                if d and base_date:
-                    s["storage_day"] = (d - base_date).days
+        # Compute relative days ONCE after the loop
+        valid_dates = [d for d in raw_dates if d is not None]
+        base_date   = min(valid_dates) if valid_dates else None
+        for s, d in zip(samples, raw_dates):
+            if d is not None and base_date is not None:
+                s["storage_day"] = (d - base_date).days
 
         if missing:
             print(f"[QPIDataset] Warning: {missing} phase files had no matching mask.")
         if not samples:
-            raise RuntimeError(
-                f"No matched phase/mask pairs found.\n"
-                f"  phase_dir: {self.phase_dir}\n"
-                f"  mask_dir:  {self.mask_dir}\n"
-                f"  Make sure your image and mask filenames share the same base name!"
-            )
+            raise RuntimeError(f"No matched phase/mask pairs found.\n"
+                            f"  phase_dir: {self.phase_dir}\n"
+                            f"  mask_dir:  {self.mask_dir}")
         return samples
 
     # ── Label CSV ─────────────────────────────────────────────────────────────
@@ -217,7 +182,7 @@ class QPIDataset(Dataset):
 
     # ── Loaders ───────────────────────────────────────────────────────────────
     def _load_phase(self, path: Path) -> np.ndarray:
-        if path.suffix in [".tif", ".tiff"]:
+        if path.suffix.lower() in [".tif", ".tiff"]:
             if not TIFF_AVAILABLE:
                 raise ImportError("Install tifffile: pip install tifffile")
             phase = tifffile.imread(str(path)).astype(np.float32)
@@ -242,13 +207,13 @@ class QPIDataset(Dataset):
             but all channels carry the same class-index plane.
             A warning is printed if channels differ so you can diagnose the files.
         """
-        if path.suffix in [".tif", ".tiff"]:
+        if path.suffix.lower() in [".tif", ".tiff"]:
             if not TIFF_AVAILABLE:
                 raise ImportError("Install tifffile: pip install tifffile")
             mask = tifffile.imread(str(path))
         elif path.suffix == ".npy":
             mask = np.load(path)
-        elif path.suffix == ".png":
+        elif path.suffix.lower() == ".png":
             try:
                 from PIL import Image
                 mask = np.array(Image.open(path))
