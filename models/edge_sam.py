@@ -90,7 +90,7 @@ class EdgeEncoder(nn.Module):
             InvertedResidual(64, 64, stride=1, expand_ratio=6),
         )
         # Stage 5 (bottleneck)
-        self.stage5 = nn.Sequential(
+        self.bottleneck = nn.Sequential(
             InvertedResidual(64, 96, stride=1, expand_ratio=6),
             InvertedResidual(96, 96, stride=1, expand_ratio=6),
             InvertedResidual(96, 96, stride=1, expand_ratio=6),
@@ -108,7 +108,7 @@ class EdgeEncoder(nn.Module):
         s2 = self.stage2(s1)
         s3 = self.stage3(s2)
         s4 = self.stage4(s3)
-        s5 = self.stage5(s4)
+        s5 = self.bottleneck(s4)
         return s1, s2, s3, s4, s5
 
 

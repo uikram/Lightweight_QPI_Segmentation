@@ -97,8 +97,18 @@ class MobileSAMSeg(nn.Module):
             sam = sam_model_registry["vit_t"](checkpoint=None)
             encoder = sam.image_encoder
 
+            # Locate the patch embedding convolution
+            # Standard SAM uses .proj, MobileSAM (TinyViT) uses .seq[0].c
+            if hasattr(encoder.patch_embed, 'proj'):
+                orig_proj = encoder.patch_embed.proj
+                is_tiny_vit = False
+            elif hasattr(encoder.patch_embed, 'seq'):
+                orig_proj = encoder.patch_embed.seq[0].c
+                is_tiny_vit = True
+            else:
+                raise AttributeError("Could not find patch embedding convolution.")
+
             # Adapt patch embedding to 1-channel input
-            orig_proj = encoder.patch_embed.proj
             new_proj  = nn.Conv2d(
                 1, orig_proj.out_channels,
                 kernel_size=orig_proj.kernel_size,
@@ -106,11 +116,17 @@ class MobileSAMSeg(nn.Module):
                 padding=orig_proj.padding,
                 bias=orig_proj.bias is not None,
             )
+            
             # Average RGB weights into single channel
             new_proj.weight.data = orig_proj.weight.data.mean(dim=1, keepdim=True)
             if orig_proj.bias is not None:
                 new_proj.bias.data = orig_proj.bias.data.clone()
-            encoder.patch_embed.proj = new_proj
+                
+            # Reassign the adapted convolution back to the model
+            if is_tiny_vit:
+                encoder.patch_embed.seq[0].c = new_proj
+            else:
+                encoder.patch_embed.proj = new_proj
 
             print("[MobileSAM] Loaded TinyViT encoder from mobile_sam package.")
             return encoder
