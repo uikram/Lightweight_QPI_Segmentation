@@ -56,7 +56,7 @@ class SegmentationTrainer:
         try:
             self.scaler = torch.amp.GradScaler('cuda', enabled=use_fp16)
             self._autocast = lambda: torch.amp.autocast('cuda', enabled=use_fp16)
-        except TypeError:
+        except (TypeError, AttributeError):
             # PyTorch < 2.0 fallback
             self.scaler = torch.cuda.amp.GradScaler(enabled=use_fp16)
             self._autocast = lambda: torch.cuda.amp.autocast(enabled=use_fp16)

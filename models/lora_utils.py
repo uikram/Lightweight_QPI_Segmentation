@@ -92,7 +92,7 @@ class LoRAConv2d(nn.Module):
     """
 
     def __init__(self, in_channels: int, out_channels: int, kernel_size: int,
-                 stride: int = 1, padding: int = 0, r: int = 4,
+                 stride: int = 1, padding: int = 0, groups: int = 1, r: int = 4,
                  lora_alpha: float = 1.0, lora_dropout: float = 0.0):
         super().__init__()
         self.in_channels  = in_channels
@@ -100,12 +100,14 @@ class LoRAConv2d(nn.Module):
         self.kernel_size  = kernel_size
         self.stride       = stride
         self.padding      = padding
+        self.groups       = groups
         self.r            = r
         self.scaling      = lora_alpha / r
         self.merged       = False
 
+        # Properly scale the in_channels by groups for depthwise compatibility
         self.weight = nn.Parameter(
-            torch.empty(out_channels, in_channels, kernel_size, kernel_size),
+            torch.empty(out_channels, in_channels // groups, kernel_size, kernel_size),
             requires_grad=False
         )
         self.bias = None
@@ -124,8 +126,10 @@ class LoRAConv2d(nn.Module):
             self.lora_dropout = nn.Identity()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Pass the captured groups and bias to the base convolution
         base_out = nn.functional.conv2d(
-            x, self.weight, self.bias, self.stride, self.padding
+            x, self.weight, bias=self.bias, stride=self.stride, 
+            padding=self.padding, groups=self.groups
         )
         lora_out = self.lora_B(self.lora_A(self.lora_dropout(x))) * self.scaling
         return base_out + lora_out
@@ -139,11 +143,17 @@ class LoRAConv2d(nn.Module):
             kernel_size=conv.kernel_size[0],
             stride=conv.stride[0],
             padding=conv.padding[0],
+            groups=conv.groups,
             r=r,
             lora_alpha=lora_alpha,
             lora_dropout=lora_dropout,
         )
         lora_conv.weight.data = conv.weight.data.clone()
+        
+        # Preserve the original bias if it exists
+        if conv.bias is not None:
+            lora_conv.bias = nn.Parameter(conv.bias.data.clone(), requires_grad=False)
+            
         return lora_conv
 
 
@@ -199,6 +209,10 @@ def inject_lora_into_model(
             setattr(parent, attr, lora_layer)
             replacements += 1
 
+    for name, param in model.named_parameters():
+        if "dec" in name or "final" in name:
+            param.requires_grad = True
+    
     print(f"[LoRA] Injected {replacements} LoRA layers (strategy={strategy}, r={r})")
     _print_trainable_parameters(model)
     return model
@@ -220,8 +234,6 @@ def _should_inject(name: str, module: nn.Module, strategy: str,
         return any(t in name for t in target_names)
 
     if strategy == "encoder_only":
-        if isinstance(module, nn.Conv2d) and module.groups > 1:
-            return False
         return "enc" in name and isinstance(module, (nn.Linear, nn.Conv2d))
 
     if strategy == "attention_blocks":
