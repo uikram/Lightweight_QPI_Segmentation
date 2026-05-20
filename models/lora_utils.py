@@ -134,6 +134,10 @@ class LoRAConv2d(nn.Module):
         lora_out = self.lora_B(self.lora_A(self.lora_dropout(x))) * self.scaling
         return base_out + lora_out
 
+    def merge(self):
+        """Merging Conv2D LoRA layers requires complex tensor contraction."""
+        raise NotImplementedError("Mathematical merging of Conv2d LoRA weights is not implemented. Use LoRALinear for mergeable bottlenecks.")
+
     @classmethod
     def from_conv2d(cls, conv: nn.Conv2d, r: int = 4,
                     lora_alpha: float = 1.0, lora_dropout: float = 0.0) -> "LoRAConv2d":
@@ -230,6 +234,10 @@ def merge_lora_weights(model: nn.Module) -> nn.Module:
 
 def _should_inject(name: str, module: nn.Module, strategy: str,
                    target_names: Optional[List[str]]) -> bool:
+    # GUARD: Never inject dense LoRA into depthwise convolutions to maintain lightweight edge profile
+    if isinstance(module, nn.Conv2d) and module.groups == module.in_channels and module.in_channels > 1:
+        return False
+
     if target_names is not None:
         return any(t in name for t in target_names)
 

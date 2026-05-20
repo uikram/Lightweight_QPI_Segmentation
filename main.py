@@ -105,6 +105,9 @@ def run_sweep(args):
         
         # Initialize everything with the overridden rank
         model, config = init_environment(args, override_rank=r)
+        
+        # Override lora_alpha dynamically to keep the LoRA scaling ratio (alpha/r) equal to 1.0
+        config.lora_alpha = float(r)
         metrics_tracker = MetricsTracker(f"{config.architecture}_r{r}", config.results_dir)
         trainer = SegmentationTrainer(model, config, metrics_tracker)
         trainer.train()

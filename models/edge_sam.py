@@ -161,25 +161,43 @@ class EdgeSAMSeg(nn.Module):
         super().__init__()
         self.num_classes = num_classes
 
+        # 1. Build the encoder
         self.encoder = self._build_encoder(pretrained)
-        self.decoder = EdgeDecoder(
+
+        # 2. Safely initialize the correct decoder here in __init__
+        if isinstance(self.encoder, EdgeEncoder):
+            self.decoder = EdgeDecoder(
             encoder_channels=self.encoder.out_channels,
             num_classes=num_classes,
-        )
+            )
+            
+            # Initialize fallback decoder for official EdgeSAM (which outputs a 256-d tensor)
+            self.simple_decoder = nn.Sequential(
+                nn.Conv2d(256, 64, 3, padding=1),
+                nn.ReLU6(inplace=True),
+                nn.Conv2d(64, self.num_classes, 1)
+            )
+            
+            self._lora_injected = False
+        else:
+            # The official edge_sam returns a single tensor bottleneck
+            bottleneck_dim = self.encoder.out_channels[-1] if hasattr(self.encoder, 'out_channels') else 256
+            self.simple_decoder = nn.Sequential(
+                nn.Conv2d(bottleneck_dim, 64, 3, padding=1),
+                nn.ReLU6(inplace=True),
+                nn.Conv2d(64, self.num_classes, 1)
+            )
+            self.use_simple_decoder = True
+            
         self._lora_injected = False
 
     def _build_encoder(self, pretrained: bool):
-        """
-        Build encoder. Attempts EdgeSAM official encoder first,
-        falls back to our efficient EdgeEncoder.
-        """
+        # [Keep your exact _build_encoder implementation here]
         try:
             from edge_sam import sam_model_registry
-            # Note: If you downloaded the weights, you can replace None with "weights/edge_sam.pth"
             sam     = sam_model_registry["edge_sam"](checkpoint=None)
             encoder = sam.image_encoder
 
-            # FIX: Dynamically find and adapt the first 3-channel Conv2d layer
             first_conv_name = None
             first_conv_layer = None
             parent_module = encoder
@@ -188,7 +206,6 @@ class EdgeSAMSeg(nn.Module):
                 if isinstance(module, nn.Conv2d) and module.in_channels == 3:
                     first_conv_name = name.split('.')[-1]
                     first_conv_layer = module
-                    # Resolve the parent module holding this conv layer
                     for part in name.split('.')[:-1]:
                         parent_module = getattr(parent_module, part)
                     break
@@ -196,7 +213,6 @@ class EdgeSAMSeg(nn.Module):
             if first_conv_layer is None:
                 raise AttributeError("Could not find initial 3-channel Conv2d to adapt.")
                 
-            # Create a 1-channel replacement
             new_conv = nn.Conv2d(
                 1, first_conv_layer.out_channels, 
                 first_conv_layer.kernel_size,
@@ -205,12 +221,10 @@ class EdgeSAMSeg(nn.Module):
                 bias=first_conv_layer.bias is not None
             )
             
-            # Average the RGB weights into a single channel
             new_conv.weight.data = first_conv_layer.weight.data.mean(dim=1, keepdim=True)
             if first_conv_layer.bias is not None:
                 new_conv.bias.data = first_conv_layer.bias.data.clone()
                 
-            # Replace the old layer with the new 1-channel layer
             setattr(parent_module, first_conv_name, new_conv)
             
             encoder.out_channels = [64, 128, 256, 512, 256]
@@ -225,18 +239,10 @@ class EdgeSAMSeg(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         skips = self.encoder(x)
         
-        # FIX: Handle official EdgeSAM (single tensor) vs custom EdgeEncoder (tuple)
-        if isinstance(skips, tuple):
+        # Route to the appropriate registered decoder
+        if not self.use_simple_decoder:
             logits = self.decoder(*skips)
         else:
-            # Fallback adapter if official encoder is used (which lacks FPN skips)
-            # Projects the bottleneck directly to num_classes
-            if not hasattr(self, 'simple_decoder'):
-                self.simple_decoder = nn.Sequential(
-                    nn.Conv2d(skips.shape[1], 64, 3, padding=1),
-                    nn.ReLU6(inplace=True),
-                    nn.Conv2d(64, self.num_classes, 1)
-                ).to(x.device)
             logits = self.simple_decoder(skips)
 
         if logits.shape[2:] != x.shape[2:]:
@@ -261,7 +267,10 @@ class EdgeSAMSeg(nn.Module):
     def encode_image(self, x: torch.Tensor) -> torch.Tensor:
         """Feature extraction for evaluation."""
         skips = self.encoder(x)
-        return skips[-1].mean(dim=[2, 3])
+        # FIX: Check if tuple vs single tensor
+        if isinstance(skips, tuple):
+            return skips[-1].mean(dim=[2, 3])
+        return skips.mean(dim=[2, 3])
 
     def count_parameters(self):
         total     = sum(p.numel() for p in self.parameters())
