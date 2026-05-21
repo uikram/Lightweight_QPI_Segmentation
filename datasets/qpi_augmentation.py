@@ -173,23 +173,19 @@ def _center_crop_or_pad(x: torch.Tensor, target_H: int, target_W: int) -> torch.
 
 class PhaseNormalization:
     """
-    Normalize phase map for numerical stability ONLY.
-    Does NOT alter the physical meaning of phase values.
-    Subtracts mean, divides by std — per-image.
+    Normalize phase map for numerical stability using GLOBAL dataset statistics.
+    Prevents patch-level fluctuations from destroying absolute dry-mass proxy data.
     """
+    def __init__(self, global_mean=0.0, global_std=1.0):
+        # Default to 0/1 (no-op) unless global dataset statistics are passed
+        self.global_mean = global_mean
+        self.global_std = global_std
 
     def __call__(self, phase: torch.Tensor) -> torch.Tensor:
-        mean = phase.mean()
-        std  = phase.std().clamp(min=1e-8)
-        return (phase - mean) / std
+        return (phase - self.global_mean) / self.global_std
 
 
 class QPIAugmentation:
-    """
-    Composed physics-preserving augmentation pipeline for QPI training.
-    Applies geometric transforms only.
-    """
-
     def __init__(self, flip_h: bool = True, flip_v: bool = True,
                  rotate: bool = True, translate: bool = True,
                  zoom: bool = False, normalize: bool = True):
@@ -203,8 +199,10 @@ class QPIAugmentation:
             self.transforms.append(RandomRotation90(p=0.75))
         if translate:
             self.transforms.append(RandomTranslation(max_shift=0.1, p=0.5))
+            
+        # FIX: RandomZoom violates physics-preservation of spatial volumes. Disabled.
         if zoom:
-            self.transforms.append(RandomZoom(zoom_range=(0.9, 1.1), p=0.3))
+            print("Warning: Zoom augmentation is disabled to preserve physical volume calculations.")
 
         self.normalizer = PhaseNormalization() if normalize else None
 

@@ -62,7 +62,7 @@ class PhaseMaskContrast(nn.Module):
         return loss  # Shape is already (B,)
 
 class MultiClassDiceLoss(nn.Module):
-    def __init__(self, num_classes=5, ignore_index=0, weight=None):
+    def __init__(self, num_classes=5, ignore_index=None, weight=None):
         super().__init__()
         self.num_classes = num_classes
         self.ignore_index = ignore_index
@@ -74,7 +74,7 @@ class MultiClassDiceLoss(nn.Module):
         loss = 0.0
         weight_sum = 0.0
         for c in range(self.num_classes):
-            if c == self.ignore_index:
+            if self.ignore_index is not None and c == self.ignore_index:
                 continue
             p = pred_soft[:, c]
             g = (target == c).float()
@@ -151,17 +151,6 @@ class PhaseVolumePreservation(nn.Module):
 
 # ---------------------------------------------------------------------------
 class PhysicsAwarePhaseLoss(nn.Module):
-    """
-    Combined Physics-Aware Phase Consistency Loss for multi-class QPI.
-
-    L_total = L_CE + λ1 * L_PMC + λ2 * L_BGA + λ3 * L_PV
-
-    The CrossEntropyLoss handles the 5-class biological classification.
-    Physics losses (PMC, BGA, PV) operate on foreground probability
-    (cell vs background) derived from the softmax output, so they receive
-    already-computed probabilities and skip the internal sigmoid step.
-    """
-
     def __init__(self,
                  lambda1: float = 0.1,
                  lambda2: float = 0.05,
@@ -174,11 +163,11 @@ class PhysicsAwarePhaseLoss(nn.Module):
         self.lambda2 = lambda2
         self.lambda3 = lambda3
 
-        # CrossEntropyLoss for 5-class biology
         weights = class_weights if class_weights is not None else DEFAULT_CLASS_WEIGHTS
         weight_tensor = torch.tensor(weights, dtype=torch.float32)
-        # Pass the weight_tensor to the Dice loss
-        self.ce_loss = MultiClassDiceLoss(num_classes=5, ignore_index=0, weight=weight_tensor)
+        
+        # FIX: Set ignore_index=None so the background class weight (0.5) is actually utilized
+        self.ce_loss = MultiClassDiceLoss(num_classes=5, ignore_index=None, weight=weight_tensor)
 
         self.pmc_loss = PhaseMaskContrast(margin=pmc_margin)
         self.bga_loss = BoundaryGradientAlignment()
@@ -241,16 +230,14 @@ class PhysicsAwarePhaseLoss(nn.Module):
 # ---------------------------------------------------------------------------
 class DiceOnlyLoss(nn.Module):
     """
-    Ablation baseline: CrossEntropyLoss only, no physics terms.
-    Used in ablation study (Section 4.5).
+    Ablation baseline: Dice Loss only, no physics terms.
+    Ensures a valid apples-to-apples comparison with PhysicsAwarePhaseLoss.
     """
-
     def __init__(self, class_weights: Optional[list] = None):
         super().__init__()
         weights = class_weights if class_weights is not None else DEFAULT_CLASS_WEIGHTS
-        self.ce_loss = nn.CrossEntropyLoss(
-            weight=torch.tensor(weights, dtype=torch.float32)
-        )
+        weight_tensor = torch.tensor(weights, dtype=torch.float32)
+        self.ce_loss = MultiClassDiceLoss(num_classes=5, ignore_index=None, weight=weight_tensor)
 
     def forward(self, pred, target, phase_map=None):
         return self.ce_loss(pred, target)

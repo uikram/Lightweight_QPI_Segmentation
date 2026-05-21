@@ -111,7 +111,7 @@ class SegmentationTrainer:
                 torch.save(
                     {"epoch": epoch + 1,
                      "model_state": self.model.state_dict(),
-                     "dice": self.best_dice},
+                     "mean_dice": self.best_dice},
                     ckpt_path,
                 )
                 print(f"  -> Best model saved (Dice: {self.best_dice:.4f})")

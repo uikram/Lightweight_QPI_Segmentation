@@ -60,15 +60,14 @@ class LoRALinear(nn.Module):
 
     def merge(self):
         if not self.merged:
-            # For 1x1 convolutions used in the A and B matrices:
             # W' = W + (B @ A) * scaling
-            A_weight = self.lora_A.weight.squeeze() # (r, in_channels)
-            B_weight = self.lora_B.weight.squeeze() # (out_channels, r)
+            A_weight = self.lora_A  # (r, in_features)
+            B_weight = self.lora_B  # (out_features, r)
             
             # Compute the low-rank delta
             delta = (B_weight @ A_weight) * self.scaling
             
-            # Reshape delta to match the base Conv2D weight shape (out, in/groups, k, k)
+            # Reshape delta to match the base Conv2D/Linear weight shape
             delta = delta.view(self.weight.shape)
             
             self.weight.data += delta
@@ -76,7 +75,11 @@ class LoRALinear(nn.Module):
 
     def unmerge(self):
         if self.merged:
-            self.weight.data -= (self.lora_B @ self.lora_A) * self.scaling
+            A_weight = self.lora_A
+            B_weight = self.lora_B
+            delta = (B_weight @ A_weight) * self.scaling
+            delta = delta.view(self.weight.shape)
+            self.weight.data -= delta
             self.merged = False
 
     @classmethod

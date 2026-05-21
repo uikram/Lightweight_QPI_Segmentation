@@ -134,8 +134,8 @@ class SegmentationMetrics:
         if results is None:
             results = self.compute()
         print(f"\n{prefix}Segmentation Metrics:")
-        print(f"  Dice:            {results.get('dice', 0):.4f}")
-        print(f"  IoU:             {results.get('iou', 0):.4f}")
+        print(f"  Dice:            {results.get('mean_dice', 0):.4f}")
+        print(f"  IoU:             {results.get('mean_iou', 0):.4f}")
         print(f"  AJI:             {results.get('aji', 0):.4f}")
         print(f"  Boundary F1:     {results.get('bf1', 0):.4f}")
         if "phase_vol_error" in results:

@@ -20,12 +20,17 @@ class DepthwiseSeparableConv(nn.Module):
         super().__init__()
         self.dw = nn.Conv2d(in_ch, in_ch, 3, stride=stride, padding=1,
                             groups=in_ch, bias=False)
+        self.bn1 = nn.BatchNorm2d(in_ch)
+        self.act1 = nn.ReLU6(inplace=True)
+        
         self.pw = nn.Conv2d(in_ch, out_ch, 1, bias=False)
-        self.bn = nn.BatchNorm2d(out_ch)
-        self.act = nn.ReLU6(inplace=True)
+        self.bn2 = nn.BatchNorm2d(out_ch)
+        self.act2 = nn.ReLU6(inplace=True)
 
     def forward(self, x):
-        return self.act(self.bn(self.pw(self.dw(x))))
+        x = self.act1(self.bn1(self.dw(x)))
+        x = self.act2(self.bn2(self.pw(x)))
+        return x
 
 
 class InvertedResidual(nn.Module):
