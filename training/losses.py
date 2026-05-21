@@ -66,7 +66,6 @@ class MultiClassDiceLoss(nn.Module):
         super().__init__()
         self.num_classes = num_classes
         self.ignore_index = ignore_index
-        # Register weight as a buffer so it automatically moves to the correct device
         self.register_buffer('weight', weight)
 
     def forward(self, pred, target):
@@ -78,12 +77,16 @@ class MultiClassDiceLoss(nn.Module):
                 continue
             p = pred_soft[:, c]
             g = (target == c).float()
-            intersection = (p * g).sum()
-            c_loss = 1 - (2 * intersection + 1e-8) / (p.sum() + g.sum() + 1e-8)
+            
+            # FIX: Compute intersection and union per-image (dim=[1, 2]), then mean across batch
+            intersection = (p * g).sum(dim=[1, 2])
+            c_loss = 1 - (2 * intersection + 1e-8) / (p.sum(dim=[1, 2]) + g.sum(dim=[1, 2]) + 1e-8)
+            c_loss = c_loss.mean()
             
             w = self.weight[c] if self.weight is not None else 1.0
             loss += w * c_loss
             weight_sum += w
+            
         return loss / (weight_sum + 1e-8)
 
 class BoundaryGradientAlignment(nn.Module):
@@ -151,6 +154,10 @@ class PhaseVolumePreservation(nn.Module):
 
 # ---------------------------------------------------------------------------
 class PhysicsAwarePhaseLoss(nn.Module):
+    """
+    Combined Physics-Aware Phase Consistency Loss for multi-class QPI.
+    L_total = L_Dice + lambda1 * L_PMC + lambda2 * L_BGA + lambda3 * L_PV
+    """
     def __init__(self,
                  lambda1: float = 0.1,
                  lambda2: float = 0.05,
@@ -166,24 +173,24 @@ class PhysicsAwarePhaseLoss(nn.Module):
         weights = class_weights if class_weights is not None else DEFAULT_CLASS_WEIGHTS
         weight_tensor = torch.tensor(weights, dtype=torch.float32)
         
-        # FIX: Set ignore_index=None so the background class weight (0.5) is actually utilized
-        self.ce_loss = MultiClassDiceLoss(num_classes=5, ignore_index=None, weight=weight_tensor)
+        # FIX: Renamed from ce_loss to dice_loss to match the manuscript
+        self.dice_loss = MultiClassDiceLoss(num_classes=5, ignore_index=None, weight=weight_tensor)
 
         self.pmc_loss = PhaseMaskContrast(margin=pmc_margin)
         self.bga_loss = BoundaryGradientAlignment()
         self.pv_loss  = PhaseVolumePreservation(normalize=pv_normalize)
 
     def forward(self, pred: torch.Tensor, target: torch.Tensor, phase_map: torch.Tensor) -> torch.Tensor:
-        # 1. Biological classification loss
-        L_ce = self.ce_loss(pred, target)
+        # 1. Biological classification loss (Dice)
+        L_dice = self.dice_loss(pred, target)
 
         # 2. Derive foreground probability
         pred_softmax   = torch.softmax(pred, dim=1)
-        pred_fg_prob   = 1.0 - pred_softmax[:, 0:1, :, :]  # (B, 1, H, W)
-        target_binary  = (target > 0).long()               # (B, H, W)
+        pred_fg_prob   = 1.0 - pred_softmax[:, 0:1, :, :]  
+        target_binary  = (target > 0).long()               
 
         # 3. Check which images in the batch actually contain cells
-        has_cells = (target_binary.sum(dim=[1, 2]) > 0).float() # (B,)
+        has_cells = (target_binary.sum(dim=[1, 2]) > 0).float() 
 
         # 4. Compute unreduced physics losses
         L_pmc = self.pmc_loss(pred_fg_prob, phase_map, apply_sigmoid=False)
@@ -198,32 +205,29 @@ class PhysicsAwarePhaseLoss(nn.Module):
         else:
             L_pmc = L_bga = L_pv = 0.0
 
-        return L_ce + self.lambda1 * L_pmc + self.lambda2 * L_bga + self.lambda3 * L_pv
+        return L_dice + self.lambda1 * L_pmc + self.lambda2 * L_bga + self.lambda3 * L_pv
 
     def get_loss_components(self,
                             pred: torch.Tensor,
                             target: torch.Tensor,
                             phase_map: torch.Tensor) -> dict:
         """Return individual loss component values for logging/ablation."""
-
         with torch.no_grad():
             pred_softmax = torch.softmax(pred, dim=1)
             pred_fg_prob = 1.0 - pred_softmax[:, 0:1, :, :]
             target_binary = (target > 0).long()
 
-            # L_ce is already a scalar, but the physics terms are (B,) tensors now
-            L_ce  = self.ce_loss(pred, target).item()
+            L_dice = self.dice_loss(pred, target).item()
             L_pmc = self.pmc_loss(pred_fg_prob, phase_map, apply_sigmoid=False).mean().item()
             L_bga = self.bga_loss(pred_fg_prob, phase_map, apply_sigmoid=False).mean().item()
-            L_pv  = self.pv_loss(pred_fg_prob, target_binary, phase_map,
-                                 apply_sigmoid=False).mean().item()
+            L_pv  = self.pv_loss(pred_fg_prob, target_binary, phase_map, apply_sigmoid=False).mean().item()
 
         return {
-            "L_ce":   L_ce,
+            "L_dice": L_dice,
             "L_pmc":  L_pmc,
             "L_bga":  L_bga,
             "L_pv":   L_pv,
-            "L_total": L_ce + self.lambda1 * L_pmc + self.lambda2 * L_bga + self.lambda3 * L_pv,
+            "L_total": L_dice + self.lambda1 * L_pmc + self.lambda2 * L_bga + self.lambda3 * L_pv,
         }
 
 

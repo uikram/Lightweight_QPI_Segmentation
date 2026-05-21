@@ -299,7 +299,7 @@ def get_qpi_loaders(config, num_workers: int = 4):
     batch_size = getattr(config, "batch_size",  8)
     debug_mode = getattr(config, "debug_mode",  False)
 
-    train_ds = QPIDataset(data_root, split="train", image_size=image_size, augment=True)
+    train_ds = QPIDataset(data_root, split="train", image_size=image_size, augment=False)
     val_ds   = QPIDataset(data_root, split="val",   image_size=image_size, augment=False)
 
     if debug_mode:

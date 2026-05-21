@@ -91,16 +91,19 @@ class SegmentationTrainer:
             print(f"\nEpoch {epoch + 1}/{self.epochs}  "
                   f"lr={self.optimizer.param_groups[0]['lr']:.2e}")
 
-            train_loss           = self._train_epoch()
+            # Unpack the components
+            train_loss, train_comps = self._train_epoch()
             val_loss, val_metrics = self._val_epoch()
 
             self.scheduler.step()
 
+            # Pass the components to the tracker
             self.metrics.track_epoch_metrics(
                 epoch + 1,
                 train_loss=train_loss,
                 val_loss=val_loss,
                 val_metrics=val_metrics,
+                train_loss_components=train_comps # Tracked here
             )
 
             dice   = val_metrics.get("mean_dice", 0.0)
@@ -118,20 +121,27 @@ class SegmentationTrainer:
 
 
     # ──────────────────────────────────────────────────────────────────────────
-    def _train_epoch(self) -> float:
+    def _train_epoch(self) -> tuple:
         self.model.train()
         total_loss = 0.0
+        
+        # Track components
+        total_L_dice = 0.0
+        total_L_pmc = 0.0
+        total_L_bga = 0.0
+        total_L_pv = 0.0
+        
         pbar = tqdm(self.train_loader, desc="  Train", leave=False)
 
         for batch in pbar:
-            images    = batch["phase"].to(self.device)       # (B, 1, H, W)
-            targets   = batch["mask"].to(self.device)        # (B, H, W) long 0-4
+            images    = batch["phase"].to(self.device)
+            targets   = batch["mask"].to(self.device)
             phase_raw = batch.get("phase_raw", images).to(self.device)
 
             self.optimizer.zero_grad()
 
             with self._autocast():
-                logits = self.model(images)                  # (B, C, H, W)
+                logits = self.model(images)
                 loss   = self.criterion(logits, targets, phase_raw)
 
             self.scaler.scale(loss).backward()
@@ -139,9 +149,26 @@ class SegmentationTrainer:
             self.scaler.update()
 
             total_loss += loss.item()
+            
+            # Extract and add individual loss values
+            if hasattr(self.criterion, 'get_loss_components'):
+                comps = self.criterion.get_loss_components(logits, targets, phase_raw)
+                total_L_dice += comps.get("L_dice", 0.0)
+                total_L_pmc  += comps.get("L_pmc", 0.0)
+                total_L_bga  += comps.get("L_bga", 0.0)
+                total_L_pv   += comps.get("L_pv", 0.0)
+
             pbar.set_postfix({"loss": f"{loss.item():.4f}"})
 
-        return total_loss / len(self.train_loader)
+        num_batches = len(self.train_loader)
+        components_avg = {
+            "L_dice": total_L_dice / num_batches,
+            "L_pmc": total_L_pmc / num_batches,
+            "L_bga": total_L_bga / num_batches,
+            "L_pv": total_L_pv / num_batches,
+        }
+        
+        return total_loss / num_batches, components_avg
 
     # ──────────────────────────────────────────────────────────────────────────
     def _val_epoch(self):

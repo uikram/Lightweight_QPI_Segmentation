@@ -29,6 +29,10 @@ class MetricsTracker:
             "epochs":     [],
             "train_loss": [],
             "val_loss":   [],
+            "train_L_dice": [],
+            "train_L_pmc": [],
+            "train_L_bga": [],
+            "train_L_pv": [],
             "val_dice":   [],
             "val_aji":    [],
             "val_bf1":    [],
@@ -55,7 +59,8 @@ class MetricsTracker:
               f"({self.metrics['parameters']['trainable_percentage']:.2f}%)")
 
     def track_epoch_metrics(self, epoch: int, train_loss: float = None,
-                            val_loss: float = None, val_metrics: dict = None):
+                            val_loss: float = None, val_metrics: dict = None,
+                            train_loss_components: dict = None):
         self.training_history["epochs"].append(int(epoch))
 
         if train_loss is not None:
@@ -63,8 +68,14 @@ class MetricsTracker:
         if val_loss is not None:
             self.training_history["val_loss"].append(float(val_loss))
 
+        # Log individual physics loss components
+        if train_loss_components is not None:
+            self.training_history["train_L_dice"].append(float(train_loss_components.get("L_dice", 0.0)))
+            self.training_history["train_L_pmc"].append(float(train_loss_components.get("L_pmc", 0.0)))
+            self.training_history["train_L_bga"].append(float(train_loss_components.get("L_bga", 0.0)))
+            self.training_history["train_L_pv"].append(float(train_loss_components.get("L_pv", 0.0)))
+
         if val_metrics is not None:
-            # Note: Expects 'mean_dice' as updated previously
             self.training_history["val_dice"].append(float(val_metrics.get("mean_dice", 0.0)))
             self.training_history["val_aji"].append(float(val_metrics.get("aji", 0.0)))
             self.training_history["val_bf1"].append(float(val_metrics.get("bf1", 0.0)))
