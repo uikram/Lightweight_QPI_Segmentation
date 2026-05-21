@@ -52,12 +52,15 @@ class SegmentationTrainer:
 
         # ── Mixed precision ───────────────────────────────────────────────────
         use_fp16 = getattr(config, 'mixed_precision', 'fp16') == 'fp16'
-        # Support both old (torch.cuda.amp) and new (torch.amp) APIs
+        
+        # Dynamically handle local architecture (MPS) vs Server GPU (CUDA)
+        device_type = 'cuda' if 'cuda' in str(self.device) else ('mps' if 'mps' in str(self.device) else 'cpu')
+        
         try:
-            self.scaler = torch.amp.GradScaler('cuda', enabled=use_fp16)
-            self._autocast = lambda: torch.amp.autocast('cuda', enabled=use_fp16)
+            self.scaler = torch.amp.GradScaler(device_type, enabled=use_fp16)
+            self._autocast = lambda: torch.amp.autocast(device_type, enabled=use_fp16)
         except (TypeError, AttributeError):
-            # PyTorch < 2.0 fallback
+            # PyTorch < 2.0 fallback (assumes CUDA)
             self.scaler = torch.cuda.amp.GradScaler(enabled=use_fp16)
             self._autocast = lambda: torch.cuda.amp.autocast(enabled=use_fp16)
 

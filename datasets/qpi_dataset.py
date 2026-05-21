@@ -316,8 +316,13 @@ def get_qpi_loaders(config, num_workers: int = 4):
     if not debug_mode and len(ds_for_weights) > 0 and len(ds_for_weights.labels) > 0:
         class_counts = torch.zeros(5) # 5 classes
         for s in ds_for_weights.samples:
-            cls = ds_for_weights.labels.get(s["stem"], 0)
-            class_counts[cls] += 1
+            if s["stem"] in ds_for_weights.labels:
+                cls = ds_for_weights.labels[s["stem"]]
+                class_counts[cls] += 1
+            else:
+                # Assign missing labels explicitly to class 1 (Discocyte) as a safe 
+                # majority-class default, preventing background (0) frequency distortion.
+                class_counts[1] += 1
             
         class_counts = class_counts.clamp(min=1)
         class_weights = 1.0 / class_counts

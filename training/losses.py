@@ -59,7 +59,7 @@ class PhaseMaskContrast(nn.Module):
                   ((1 - pred_mask).sum(dim=[1, 2]) + eps)
 
         loss = F.relu(mu_bg - mu_cell + self.margin)
-        return loss.mean()
+        return loss.mean(dim=[1, 2])
 
 class MultiClassDiceLoss(nn.Module):
     def __init__(self, num_classes=5, ignore_index=0, weight=None):
@@ -120,32 +120,19 @@ class BoundaryGradientAlignment(nn.Module):
         grad_phase_max  = grad_phase.amax(dim=[2, 3], keepdim=True).clamp(min=1e-8)
         grad_phase_norm = grad_phase / grad_phase_max
 
-        return F.l1_loss(grad_mask, grad_phase_norm)
+        return F.l1_loss(grad_mask, grad_phase_norm, reduction='none').mean(dim=[1, 2, 3])
 
 
 class PhaseVolumePreservation(nn.Module):
-    """
-    Phase-Volume Preservation Loss.
-    Ensures the phase-integrated optical quantity (dry mass proxy)
-    is preserved between predicted and ground-truth masks.
-
-    L_PV = |Σ_{pred}(Phase) - Σ_{GT}(Phase)| / |Σ_{GT}(Phase)|
-
-    apply_sigmoid: set False when pred is already a probability map [0,1].
-    """
-
-    def __init__(self, normalize: bool = True):
+    def __init__(self, normalize: bool = True, epsilon: float = 1e-4):
         super().__init__()
         self.normalize = normalize
+        self.epsilon = epsilon
 
     def forward(self, pred: torch.Tensor, target: torch.Tensor,
                 phase_map: torch.Tensor,
                 apply_sigmoid: bool = True) -> torch.Tensor:
-        """
-        pred:      (B, 1, H, W) logits  OR  foreground probabilities [0,1]
-        target:    (B, H, W) binary long tensor  (cell vs background)
-        phase_map: (B, 1, H, W) raw phase values
-        """
+        
         pred_prob = torch.sigmoid(pred).squeeze(1) if apply_sigmoid else pred.squeeze(1)
         target_f  = target.float()
         phase     = phase_map.squeeze(1)
@@ -154,12 +141,12 @@ class PhaseVolumePreservation(nn.Module):
         gt_vol   = (target_f  * phase).sum(dim=[1, 2])
 
         if self.normalize:
-            gt_vol_norm = gt_vol.abs().clamp(min=1e-8)
-            loss = (torch.abs(pred_vol - gt_vol) / gt_vol_norm).mean()
+            gt_vol_norm = gt_vol.abs().clamp(min=0.0) + self.epsilon
+            loss = (torch.abs(pred_vol - gt_vol) / gt_vol_norm)
         else:
-            loss = torch.abs(pred_vol - gt_vol).mean()
+            loss = torch.abs(pred_vol - gt_vol)
 
-        return loss
+        return loss # Returns tensor of shape (B,)
 
 
 # ---------------------------------------------------------------------------
@@ -197,34 +184,30 @@ class PhysicsAwarePhaseLoss(nn.Module):
         self.bga_loss = BoundaryGradientAlignment()
         self.pv_loss  = PhaseVolumePreservation(normalize=pv_normalize)
 
-    def forward(self,
-                pred: torch.Tensor,
-                target: torch.Tensor,
-                phase_map: torch.Tensor) -> torch.Tensor:
-        """
-        pred:      (B, num_classes, H, W) raw logits from segmentation model
-        target:    (B, H, W) integer class labels 0–4
-        phase_map: (B, 1, H, W) raw (unnormalized) phase values
-
-        The CrossEntropyLoss weight tensor must be on the same device as pred.
-        """
-
-        # 1. Biological classification loss (uses full 0-4 labels)
+    def forward(self, pred: torch.Tensor, target: torch.Tensor, phase_map: torch.Tensor) -> torch.Tensor:
+        # 1. Biological classification loss
         L_ce = self.ce_loss(pred, target)
 
-        # 2. Derive foreground probability for physics losses.
-        #    P(cell) = 1 - P(background) = 1 - softmax(pred)[:,0]
+        # 2. Derive foreground probability
         pred_softmax   = torch.softmax(pred, dim=1)
         pred_fg_prob   = 1.0 - pred_softmax[:, 0:1, :, :]  # (B, 1, H, W)
+        target_binary  = (target > 0).long()               # (B, H, W)
 
-        # 3. Binary target for physics losses (cell vs background)
-        target_binary = (target > 0).long()                 # (B, H, W)
+        # 3. Check which images in the batch actually contain cells
+        has_cells = (target_binary.sum(dim=[1, 2]) > 0).float() # (B,)
 
-        # 4. Physics losses — pass_sigmoid=False because pred_fg_prob
-        #    is already a probability in [0, 1].
-        L_pmc = self.pmc_loss(pred_fg_prob, phase_map,               apply_sigmoid=False)
-        L_bga = self.bga_loss(pred_fg_prob, phase_map,               apply_sigmoid=False)
-        L_pv  = self.pv_loss( pred_fg_prob, target_binary, phase_map, apply_sigmoid=False)
+        # 4. Compute unreduced physics losses
+        L_pmc = self.pmc_loss(pred_fg_prob, phase_map, apply_sigmoid=False)
+        L_bga = self.bga_loss(pred_fg_prob, phase_map, apply_sigmoid=False)
+        L_pv  = self.pv_loss(pred_fg_prob, target_binary, phase_map, apply_sigmoid=False)
+        
+        # 5. Apply physics losses ONLY if the patch contains cells
+        if has_cells.sum() > 0:
+            L_pmc = (L_pmc * has_cells).sum() / has_cells.sum()
+            L_bga = (L_bga * has_cells).sum() / has_cells.sum()
+            L_pv  = (L_pv * has_cells).sum() / has_cells.sum()
+        else:
+            L_pmc = L_bga = L_pv = 0.0
 
         return L_ce + self.lambda1 * L_pmc + self.lambda2 * L_bga + self.lambda3 * L_pv
 

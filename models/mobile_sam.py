@@ -54,6 +54,9 @@ class LightweightMaskDecoder(nn.Module):
         img_seq = image_embeddings.flatten(2).permute(0, 2, 1)  # (B, HW, C)
         mask_tok = self.mask_tokens.weight.unsqueeze(0).expand(B, -1, -1)
         
+        # Integrate the QPI learned prompt into the mask tokens
+        mask_tok = mask_tok + prompt_embeddings 
+        
         out = self.transformer(mask_tok, img_seq)  # (B, num_classes, C)
         
         upscaled = F.interpolate(image_embeddings, scale_factor=4,
