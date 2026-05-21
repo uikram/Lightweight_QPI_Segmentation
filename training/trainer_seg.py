@@ -118,7 +118,8 @@ class SegmentationTrainer:
                     ckpt_path,
                 )
                 print(f"  -> Best model saved (Dice: {self.best_dice:.4f})")
-
+                
+        self.metrics.save_metrics()
 
     # ──────────────────────────────────────────────────────────────────────────
     def _train_epoch(self) -> tuple:
