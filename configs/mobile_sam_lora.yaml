@@ -7,7 +7,7 @@ data_root: "./dataset"
 dataset:
   batch_size: 8
   num_workers: 4
-  image_size: 512          # MobileSAM internal resize target — must match model default
+  image_size: 1024          # MobileSAM internal resize target — must match model default
 
 model:
   architecture: "mobile_sam"

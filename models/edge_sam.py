@@ -170,15 +170,9 @@ class EdgeSAMSeg(nn.Module):
             encoder_channels=self.encoder.out_channels,
             num_classes=num_classes,
             )
+            self.use_simple_decoder = False
             
             # Initialize fallback decoder for official EdgeSAM (which outputs a 256-d tensor)
-            self.simple_decoder = nn.Sequential(
-                nn.Conv2d(256, 64, 3, padding=1),
-                nn.ReLU6(inplace=True),
-                nn.Conv2d(64, self.num_classes, 1)
-            )
-            
-            self._lora_injected = False
         else:
             # The official edge_sam returns a single tensor bottleneck
             bottleneck_dim = self.encoder.out_channels[-1] if hasattr(self.encoder, 'out_channels') else 256

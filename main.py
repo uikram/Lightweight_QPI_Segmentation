@@ -41,12 +41,18 @@ def init_environment(args, override_rank=None):
     # If sweeping, dynamically override the rank and directories in memory
     if override_rank is not None:
         config.lora_r = override_rank
+        config.lora_alpha = float(override_rank)  # Override alpha BEFORE the model is built
         base_dir = getattr(config, 'results_dir', Path('results'))
         # Create separate output folders for each rank (e.g., results_dir_r8)
         config.results_dir = Path(f"{str(base_dir)}_r{override_rank}")
         config.checkpoint_dir = config.results_dir / "checkpoints"
         
     print(f"Initializing {config.architecture.upper()} (LoRA r={getattr(config, 'lora_r', 'None')})")
+    
+    if hasattr(config, 'lora_r') and hasattr(config, 'lora_alpha'):
+        scaling = float(config.lora_alpha) / float(config.lora_r)
+        print(f"  -> Verified LoRA Config: r={config.lora_r}, alpha={config.lora_alpha}, scaling={scaling:.2f}")
+
     model = get_model(config.architecture, config)
     model.to(config.device)
     
