@@ -82,7 +82,6 @@ class SegmentationTrainer:
 
     # ──────────────────────────────────────────────────────────────────────────
     def train(self):
-        self.metrics.start_training_timer()
         self.metrics.track_parameters(self.model)
 
         for epoch in range(self.epochs):
@@ -114,8 +113,6 @@ class SegmentationTrainer:
                 )
                 print(f"  -> Best model saved (Dice: {self.best_dice:.4f})")
 
-        self.metrics.end_training_timer()
-        self.metrics.save_metrics()
 
     # ──────────────────────────────────────────────────────────────────────────
     def _train_epoch(self) -> float:
