@@ -30,6 +30,7 @@ loss_weights:
   lambda1_pmc: 0.1
   lambda2_bga: 0.05
   lambda3_pv: 0.1
+  class_weights: [0.5, 1.0, 1.5, 2.0, 2.0]
 
 results_dir: "results/mobile_sam_lora"
 checkpoint_dir: "results/mobile_sam_lora/checkpoints"

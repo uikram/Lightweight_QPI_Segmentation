@@ -61,6 +61,25 @@ class PhaseMaskContrast(nn.Module):
         loss = F.relu(mu_bg - mu_cell + self.margin)
         return loss.mean()
 
+class MultiClassDiceLoss(nn.Module):
+    def __init__(self, num_classes=5, ignore_index=0):
+        super().__init__()
+        self.num_classes = num_classes
+        self.ignore_index = ignore_index
+
+    def forward(self, pred, target):
+        pred_soft = torch.softmax(pred, dim=1)
+        loss = 0.0
+        count = 0
+        for c in range(self.num_classes):
+            if c == self.ignore_index:
+                continue
+            p = pred_soft[:, c]
+            g = (target == c).float()
+            intersection = (p * g).sum()
+            loss += 1 - (2 * intersection + 1e-8) / (p.sum() + g.sum() + 1e-8)
+            count += 1
+        return loss / count
 
 class BoundaryGradientAlignment(nn.Module):
     """
@@ -166,7 +185,7 @@ class PhysicsAwarePhaseLoss(nn.Module):
         # CrossEntropyLoss for 5-class biology
         weights = class_weights if class_weights is not None else DEFAULT_CLASS_WEIGHTS
         weight_tensor = torch.tensor(weights, dtype=torch.float32)
-        self.ce_loss = nn.CrossEntropyLoss(weight=weight_tensor)
+        self.ce_loss = MultiClassDiceLoss(num_classes=5, ignore_index=0)
 
         self.pmc_loss = PhaseMaskContrast(margin=pmc_margin)
         self.bga_loss = BoundaryGradientAlignment()
@@ -259,7 +278,6 @@ class DiceOnlyLoss(nn.Module):
 
 # ---------------------------------------------------------------------------
 def get_loss(config) -> nn.Module:
-    """Loss factory based on config."""
     loss_type = getattr(config, "loss_type", "physics_aware")
 
     if loss_type == "physics_aware":
@@ -268,9 +286,10 @@ def get_loss(config) -> nn.Module:
             lambda2=getattr(config, "lambda2_bga", 0.05),
             lambda3=getattr(config, "lambda3_pv",  0.1),
             pmc_margin=getattr(config, "pmc_margin", 0.1),
+            class_weights=getattr(config, "class_weights", None),
         )
     elif loss_type == "dice_only":
-        return DiceOnlyLoss()
+        return DiceOnlyLoss(class_weights=getattr(config, "class_weights", None))
     else:
         raise ValueError(
             f"Unknown loss type: '{loss_type}'. Choose from: physics_aware, dice_only"

@@ -84,8 +84,11 @@ def run_benchmark(config_path, device='cuda'):
     model = get_model(config.architecture, config)
     model.to(device)
     if hasattr(model, 'merge_lora'):
-        model.merge_lora()
-        print("  -> LoRA weights merged for zero-latency benchmarking.")
+        try:
+            model.merge_lora()
+            print("  -> LoRA weights merged for zero-latency benchmarking.")
+        except NotImplementedError:
+            print("  -> LoRA merge skipped (Conv2d layers; slight overhead retained).")
     # Image size must match the model's expected input.
     # MobileSAM internally resizes to 512; using the correct size here
     # ensures dummy latency reflects real inference cost.

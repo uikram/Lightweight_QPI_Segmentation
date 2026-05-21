@@ -3,6 +3,8 @@ experiment_name: "mobilenet_unet_lora_qpi"
 # Root directory containing X_train/, Y_train/, X_val/, Y_val/
 data_root: "./dataset"
 
+class_weights: [0.5, 1.0, 1.5, 2.0, 2.0]
+
 cache_dir: "./cache"
 
 dataset:
@@ -31,6 +33,7 @@ loss_weights:
   lambda1_pmc: 0.1        # Phase-Mask Contrast
   lambda2_bga: 0.05       # Boundary-Gradient Alignment
   lambda3_pv: 0.1         # Phase-Volume Preservation
-
+  class_weights: [0.5, 1.0, 1.5, 2.0, 2.0]
+  
 results_dir: "results/mobilenet_unet_lora"
 checkpoint_dir: "results/mobilenet_unet_lora/checkpoints"

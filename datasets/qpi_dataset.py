@@ -45,9 +45,6 @@ MORPHOLOGY_CLASSES = {
     "stomatocyte": 4,
 }
 
-# CrossEntropyLoss class weights: [bg, disco, echino, sphero, stomato]
-# Higher weight for rarer / clinically important degradation classes.
-CLASS_WEIGHTS = [0.5, 1.0, 1.5, 2.0, 2.0]
 
 NUM_CLASSES = 5
 
