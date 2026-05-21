@@ -83,6 +83,10 @@ class MobileSAMSeg(nn.Module):
         self.encoder_input_size = 1024  
 
         self.encoder = self._build_encoder(pretrained)
+        
+        # FIX: Explicitly track if we are using the official TinyViT or the CNN fallback
+        self.is_tiny_vit = not isinstance(self.encoder, nn.Sequential)
+
         self.prompt_encoder  = QPIPromptEncoder(embed_dim=self.EMBED_DIM)
         self.mask_decoder    = LightweightMaskDecoder(
             in_channels=self.EMBED_DIM, num_classes=num_classes
@@ -158,8 +162,8 @@ class MobileSAMSeg(nn.Module):
 
         img_emb = self.encoder(x_enc)
 
-        # FIX: Check if the last dimension is specifically the EMBED_DIM (256)
-        if img_emb.dim() == 4 and img_emb.shape[-1] == self.EMBED_DIM:
+        # FIX: Explicitly rely on the is_tiny_vit flag instead of guessing based on tensor shapes
+        if self.is_tiny_vit and img_emb.dim() == 4:
             img_emb = img_emb.permute(0, 3, 1, 2)
 
         prompt_emb = self.prompt_encoder(B, x.device)
@@ -197,8 +201,8 @@ class MobileSAMSeg(nn.Module):
                               mode="bilinear", align_corners=False)
         img_emb = self.encoder(x)
         
-        # FIX: Apply the same corrected check here
-        if img_emb.dim() == 4 and img_emb.shape[-1] == self.EMBED_DIM:
+        # FIX: Explicitly rely on the is_tiny_vit flag
+        if self.is_tiny_vit and img_emb.dim() == 4:
             img_emb = img_emb.permute(0, 3, 1, 2)
             
         return img_emb.mean(dim=[2, 3])

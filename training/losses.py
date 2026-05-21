@@ -3,16 +3,12 @@ Physics-Aware Phase Consistency Loss for QPI segmentation.
 
 Multi-class biology + binary physics bridge:
 
-    L_total = L_CE + λ1 * L_PMC + λ2 * L_BGA + λ3 * L_PV
+    L_total = L_Dice + λ1 * L_PMC + λ2 * L_BGA + λ3 * L_PV
 
-    L_CE  – CrossEntropyLoss over 5 classes (0=bg, 1-4=cell types)
-    L_PMC – Phase-Mask Contrast: cell phase > background phase
-    L_BGA – Boundary-Gradient Alignment: seg boundary ↔ phase gradient
-    L_PV  – Phase-Volume Preservation: optical volume consistency
-
-Physics losses receive foreground *probability* (already in [0,1]) derived
-from the multi-class softmax output, so they skip the internal sigmoid step
-via the apply_sigmoid=False path.
+    L_Dice – MultiClassDiceLoss over 5 classes (0=bg, 1-4=cell types)
+    L_PMC  – Phase-Mask Contrast: cell phase > background phase
+    L_BGA  – Boundary-Gradient Alignment: seg boundary ↔ phase gradient
+    L_PV   – Phase-Volume Preservation: optical volume consistency
 """
 
 import torch
@@ -152,6 +148,15 @@ class PhaseVolumePreservation(nn.Module):
 
 # ---------------------------------------------------------------------------
 class PhysicsAwarePhaseLoss(nn.Module):
+    """
+    Combined Physics-Aware Phase Consistency Loss for multi-class QPI.
+
+    L_total = L_Dice + λ1 * L_PMC + λ2 * L_BGA + λ3 * L_PV
+
+    The MultiClassDiceLoss handles the 5-class biological classification.
+    Physics losses (PMC, BGA, PV) operate on foreground probability
+    (cell vs background) derived from the softmax output...
+    """
     def __init__(self,
                  lambda1: float = 0.1,
                  lambda2: float = 0.05,

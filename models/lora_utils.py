@@ -227,7 +227,7 @@ def inject_lora_into_model(
             replacements += 1
 
     for name, param in model.named_parameters():
-        if "dec" in name or "final" in name:
+        if "dec" in name or "final" in name or "prompt" in name:  # FIX: Added "prompt"
             param.requires_grad = True
     
     print(f"[LoRA] Injected {replacements} LoRA layers (strategy={strategy}, r={r})")
