@@ -120,10 +120,8 @@ class BoundaryGradientAlignment(nn.Module):
         grad_mask  = self._spatial_gradient(pred_prob)
         grad_phase = self._spatial_gradient(phase_map)
 
-        grad_phase_max  = grad_phase.amax(dim=[2, 3], keepdim=True).clamp(min=1e-8)
-        grad_phase_norm = grad_phase / grad_phase_max
-
-        return F.l1_loss(grad_mask, grad_phase_norm, reduction='none').mean(dim=[1, 2, 3])
+        # Removed 'grad_phase_max' to strictly match manuscript Equation 3.5.3
+        return F.l1_loss(grad_mask, grad_phase, reduction='none').mean(dim=[1, 2, 3])
 
 
 class PhaseVolumePreservation(nn.Module):
@@ -154,16 +152,12 @@ class PhaseVolumePreservation(nn.Module):
 
 # ---------------------------------------------------------------------------
 class PhysicsAwarePhaseLoss(nn.Module):
-    """
-    Combined Physics-Aware Phase Consistency Loss for multi-class QPI.
-    L_total = L_Dice + lambda1 * L_PMC + lambda2 * L_BGA + lambda3 * L_PV
-    """
     def __init__(self,
                  lambda1: float = 0.1,
                  lambda2: float = 0.05,
                  lambda3: float = 0.1,
                  pmc_margin: float = 0.1,
-                 pv_normalize: bool = True,
+                 pv_normalize: bool = False,  # FIX: Changed to False to match Equation 3.5.4
                  class_weights: Optional[list] = None):
         super().__init__()
         self.lambda1 = lambda1

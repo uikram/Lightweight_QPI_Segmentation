@@ -121,7 +121,7 @@ class MobileNetUNet(nn.Module):
         return self.final_conv(out)
 
     def inject_lora(self, r: int = 4, lora_alpha: float = 1.0,
-                    lora_dropout: float = 0.0, strategy: str = "attention_blocks"):
+                    lora_dropout: float = 0.0, strategy: str = "encoder_only"):
         inject_lora_into_model(self, r=r, lora_alpha=lora_alpha,
                                lora_dropout=lora_dropout, strategy=strategy)
         self._lora_injected = True
