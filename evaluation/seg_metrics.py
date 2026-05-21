@@ -154,8 +154,8 @@ class SegmentationMetrics:
 def _aji_components(pred: np.ndarray, target: np.ndarray):
     """
     Aggregated Jaccard Index components for a single image pair.
-    For binary masks (single object class), equivalent to standard IoU.
-    For multi-instance, each predicted instance is matched to best GT instance.
+    VECTORIZED FIX: Uses bincount to compute all intersections simultaneously,
+    preventing catastrophic CPU hangs when models predict checkerboard noise.
     """
     pred_ids   = np.unique(pred[pred > 0])
     target_ids = np.unique(target[target > 0])
@@ -164,45 +164,61 @@ def _aji_components(pred: np.ndarray, target: np.ndarray):
         return 1.0, 1.0  # Both empty = perfect
 
     if len(target_ids) == 0:
-        return 0.0, pred.sum().item()
+        return 0.0, float((pred > 0).sum())
 
     if len(pred_ids) == 0:
-        return 0.0, target.sum().item()
+        return 0.0, float((target > 0).sum())
+
+    max_p = int(pred.max()) + 1
+    max_t = int(target.max()) + 1
+    
+    # 1. Compute areas of every individual prediction and target instance
+    p_areas = np.bincount(pred.ravel(), minlength=max_p)
+    t_areas = np.bincount(target.ravel(), minlength=max_t)
+
+    # 2. Compute intersection matrix using bincount on combined hashes
+    # We only care where both prediction and target are foreground (>0)
+    mask = (pred > 0) & (target > 0)
+    combo = target[mask] * max_p + pred[mask]
+    intersections = np.bincount(combo)
 
     total_inter = 0.0
     total_union = 0.0
     used_pred   = set()
 
+    # 3. Fast lookup loop (No array operations inside!)
     for t_id in target_ids:
-        t_mask = target == t_id
-        best_iou  = 0.0
-        best_p_id = -1
+        best_iou   = 0.0
+        best_p_id  = -1
+        best_inter = 0.0
+        best_union = 0.0
 
         for p_id in pred_ids:
-            p_mask = pred == p_id
-            inter  = np.logical_and(t_mask, p_mask).sum()
-            union  = np.logical_or(t_mask, p_mask).sum()
-            iou    = inter / (union + 1e-8)
-            if iou > best_iou:
-                best_iou  = iou
-                best_p_id = p_id
+            idx = t_id * max_p + p_id
+            inter = intersections[idx] if idx < len(intersections) else 0
+            
+            if inter > 0:
+                union = t_areas[t_id] + p_areas[p_id] - inter
+                iou = inter / union
+                if iou > best_iou:
+                    best_iou   = iou
+                    best_p_id  = p_id
+                    best_inter = float(inter)
+                    best_union = float(union)
 
         if best_p_id >= 0:
-            p_mask = pred == best_p_id
-            inter  = np.logical_and(t_mask, p_mask).sum()
-            union  = np.logical_or(t_mask, p_mask).sum()
-            total_inter += inter
-            total_union += union
+            total_inter += best_inter
+            total_union += best_union
             used_pred.add(best_p_id)
         else:
-            total_union += t_mask.sum()
+            total_union += float(t_areas[t_id])
 
     # Unmatched predictions add to union
     for p_id in pred_ids:
         if p_id not in used_pred:
-            total_union += (pred == p_id).sum()
+            total_union += float(p_areas[p_id])
 
-    return float(total_inter), float(total_union)
+    return total_inter, total_union
 
 
 def _boundary_stats(pred: np.ndarray, target: np.ndarray,
