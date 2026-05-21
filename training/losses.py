@@ -49,13 +49,14 @@ class PhaseMaskContrast(nn.Module):
         pred_mask = torch.sigmoid(pred).squeeze(1) if apply_sigmoid else pred.squeeze(1)
         phase     = phase_map.squeeze(1)
 
-        eps    = 1e-8
-        mu_cell = (pred_mask * phase).sum(dim=[1, 2]) / (pred_mask.sum(dim=[1, 2]) + eps)
-        mu_bg   = ((1 - pred_mask) * phase).sum(dim=[1, 2]) / \
-                  ((1 - pred_mask).sum(dim=[1, 2]) + eps)
+        cell_area = pred_mask.sum(dim=[1, 2]).clamp(min=1.0)
+        bg_area   = (1 - pred_mask).sum(dim=[1, 2]).clamp(min=1.0)
+
+        mu_cell = (pred_mask * phase).sum(dim=[1, 2]) / cell_area
+        mu_bg   = ((1 - pred_mask) * phase).sum(dim=[1, 2]) / bg_area
 
         loss = F.relu(mu_bg - mu_cell + self.margin)
-        return loss  # Shape is already (B,)
+        return loss
 
 class MultiClassDiceLoss(nn.Module):
     def __init__(self, num_classes=5, ignore_index=None, weight=None):
@@ -74,27 +75,21 @@ class MultiClassDiceLoss(nn.Module):
             p = pred_soft[:, c]
             g = (target == c).float()
             
-            # FIX: Compute intersection and union per-image (dim=[1, 2]), then mean across batch
+            # SUPERIOR FIX: Use 1.0 Laplace smoothing. 
+            # This is mathematically stable in FP16 and prevents 0/0 NaNs natively.
+            smooth = 1.0
             intersection = (p * g).sum(dim=[1, 2])
-            c_loss = 1 - (2 * intersection + 1e-8) / (p.sum(dim=[1, 2]) + g.sum(dim=[1, 2]) + 1e-8)
+            c_loss = 1 - (2 * intersection + smooth) / (p.sum(dim=[1, 2]) + g.sum(dim=[1, 2]) + smooth)
             c_loss = c_loss.mean()
             
             w = self.weight[c] if self.weight is not None else 1.0
             loss += w * c_loss
             weight_sum += w
             
-        return loss / (weight_sum + 1e-8)
+        # Safe FP16 epsilon
+        return loss / (weight_sum + 1e-4)
 
 class BoundaryGradientAlignment(nn.Module):
-    """
-    Boundary-Gradient Alignment Loss.
-    Aligns segmentation boundary with strong phase gradients.
-
-    L_BGA = ||∇(Mask) - ∇(Phase)||_1
-
-    apply_sigmoid: set False when pred is already a probability map [0,1].
-    """
-
     def __init__(self):
         super().__init__()
 
@@ -103,7 +98,10 @@ class BoundaryGradientAlignment(nn.Module):
         dy = x[:, :, 1:, :] - x[:, :, :-1, :]
         dx = F.pad(dx, (0, 1), mode="constant", value=0.0)
         dy = F.pad(dy, (0, 0, 0, 1), mode="constant", value=0.0)
-        return torch.sqrt(dx ** 2 + dy ** 2 + 1e-8)
+        
+        # SUPERIOR FIX: 1e-4 is safely above the FP16 subnormal threshold (~6.1e-5)
+        # Prevents the derivative of sqrt(0) from going to Infinity.
+        return torch.sqrt(dx ** 2 + dy ** 2 + 1e-4)
 
     def forward(self, pred: torch.Tensor, phase_map: torch.Tensor,
                 apply_sigmoid: bool = True) -> torch.Tensor:
@@ -215,11 +213,20 @@ class PhysicsAwarePhaseLoss(nn.Module):
             pred_softmax = torch.softmax(pred, dim=1)
             pred_fg_prob = 1.0 - pred_softmax[:, 0:1, :, :]
             target_binary = (target > 0).long()
+            has_cells = (target_binary.sum(dim=[1, 2]) > 0).float()
 
             L_dice = self.dice_loss(pred, target).item()
-            L_pmc = self.pmc_loss(pred_fg_prob, phase_map, apply_sigmoid=False).mean().item()
-            L_bga = self.bga_loss(pred_fg_prob, phase_map, apply_sigmoid=False).mean().item()
-            L_pv  = self.pv_loss(pred_fg_prob, target_binary, phase_map, apply_sigmoid=False).mean().item()
+            
+            L_pmc = self.pmc_loss(pred_fg_prob, phase_map, apply_sigmoid=False)
+            L_bga = self.bga_loss(pred_fg_prob, phase_map, apply_sigmoid=False)
+            L_pv  = self.pv_loss(pred_fg_prob, target_binary, phase_map, apply_sigmoid=False)
+
+            if has_cells.sum() > 0:
+                L_pmc = ((L_pmc * has_cells).sum() / has_cells.sum()).item()
+                L_bga = ((L_bga * has_cells).sum() / has_cells.sum()).item()
+                L_pv  = ((L_pv * has_cells).sum() / has_cells.sum()).item()
+            else:
+                L_pmc = L_bga = L_pv = 0.0
 
         return {
             "L_dice": L_dice,
@@ -228,7 +235,6 @@ class PhysicsAwarePhaseLoss(nn.Module):
             "L_pv":   L_pv,
             "L_total": L_dice + self.lambda1 * L_pmc + self.lambda2 * L_bga + self.lambda3 * L_pv,
         }
-
 
 # ---------------------------------------------------------------------------
 class DiceOnlyLoss(nn.Module):

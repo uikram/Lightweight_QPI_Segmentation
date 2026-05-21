@@ -242,7 +242,9 @@ class EdgeSAMSeg(nn.Module):
         if not self.use_simple_decoder:
             logits = self.decoder(*skips)
         else:
-            logits = self.simple_decoder(skips)
+            # FIX: Safely unpack the bottleneck features if skips is a tuple
+            features = skips[-1] if isinstance(skips, tuple) else skips
+            logits = self.simple_decoder(features)
 
         if logits.shape[2:] != x.shape[2:]:
             logits = F.interpolate(logits, size=x.shape[2:],

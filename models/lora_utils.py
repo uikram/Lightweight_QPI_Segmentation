@@ -213,21 +213,17 @@ def inject_lora_into_model(
         should_inject = _should_inject(name, module, strategy, target_module_names)
 
         if should_inject and isinstance(module, nn.Linear):
-            parent, attr = _get_parent_and_attr(model, name)
-            lora_layer = LoRALinear.from_linear(module, r=r, lora_alpha=lora_alpha,
-                                                lora_dropout=lora_dropout)
-            setattr(parent, attr, lora_layer)
+            lora_layer = LoRALinear.from_linear(module, r=r, lora_alpha=lora_alpha, lora_dropout=lora_dropout)
+            _replace_module(model, name, lora_layer)
             replacements += 1
 
         elif should_inject and isinstance(module, nn.Conv2d) and strategy in ("bottleneck", "encoder_only"):
-            parent, attr = _get_parent_and_attr(model, name)
-            lora_layer = LoRAConv2d.from_conv2d(module, r=r, lora_alpha=lora_alpha,
-                                                lora_dropout=lora_dropout)
-            setattr(parent, attr, lora_layer)
+            lora_layer = LoRAConv2d.from_conv2d(module, r=r, lora_alpha=lora_alpha, lora_dropout=lora_dropout)
+            _replace_module(model, name, lora_layer)
             replacements += 1
 
     for name, param in model.named_parameters():
-        if "dec" in name or "final" in name or "prompt" in name:  # FIX: Added "prompt"
+        if "dec" in name or "final" in name or "prompt" in name:
             param.requires_grad = True
     
     print(f"[LoRA] Injected {replacements} LoRA layers (strategy={strategy}, r={r})")
@@ -240,8 +236,11 @@ def merge_lora_weights(model: nn.Module) -> nn.Module:
     for module in model.modules():
         if isinstance(module, (LoRALinear, LoRAConv2d)):
             if hasattr(module, "merge"):
-                module.merge()
-    print("[LoRA] All LoRA weights merged into base weights.")
+                try:
+                    module.merge()
+                except NotImplementedError:
+                    pass  # Gracefully skip Conv2d merging
+    print("[LoRA] All eligible LoRA weights merged into base weights.")
     return model
 
 
@@ -268,12 +267,21 @@ def _should_inject(name: str, module: nn.Module, strategy: str,
     return False
 
 
-def _get_parent_and_attr(model: nn.Module, name: str):
-    parts  = name.split(".")
+def _replace_module(model: nn.Module, name: str, new_module: nn.Module):
+    """Safely replace a module, handling both named attributes and sequential indices."""
+    parts = name.split(".")
     parent = model
     for part in parts[:-1]:
-        parent = getattr(parent, part)
-    return parent, parts[-1]
+        if part.isdigit():
+            parent = parent[int(part)]
+        else:
+            parent = getattr(parent, part)
+            
+    attr = parts[-1]
+    if attr.isdigit():
+        parent[int(attr)] = new_module
+    else:
+        setattr(parent, attr, new_module)
 
 
 def _print_trainable_parameters(model: nn.Module):

@@ -153,7 +153,6 @@ class MobileSAMSeg(nn.Module):
         B = x.shape[0]
         orig_size = x.shape[2:]  # Save original dimensions
 
-        # FIX: Resize strictly to the 1024x1024 expectation for TinyViT
         if x.shape[-1] != self.encoder_input_size:
             x_enc = F.interpolate(x, size=(self.encoder_input_size, self.encoder_input_size),
                                   mode="bilinear", align_corners=False)
@@ -162,8 +161,9 @@ class MobileSAMSeg(nn.Module):
 
         img_emb = self.encoder(x_enc)
 
-        # FIX: Explicitly rely on the is_tiny_vit flag instead of guessing based on tensor shapes
-        if self.is_tiny_vit and img_emb.dim() == 4:
+        # FIX: Safely permute ONLY if the channel dimension is last (e.g., standard SAM ViT).
+        # TinyViT and fallback CNN natively output (B, C, H, W), so we avoid permuting them.
+        if img_emb.dim() == 4 and img_emb.shape[-1] == self.EMBED_DIM:
             img_emb = img_emb.permute(0, 3, 1, 2)
 
         prompt_emb = self.prompt_encoder(B, x.device)
@@ -171,7 +171,7 @@ class MobileSAMSeg(nn.Module):
         # Decode using the Lightweight Mask Decoder
         decoded = self.mask_decoder(img_emb, prompt_emb)
         
-        # Restore back to original dataset resolution (e.g., 512x512)
+        # Restore back to original dataset resolution
         logits = F.interpolate(
             decoded,
             size=orig_size,
@@ -201,8 +201,7 @@ class MobileSAMSeg(nn.Module):
                               mode="bilinear", align_corners=False)
         img_emb = self.encoder(x)
         
-        # FIX: Explicitly rely on the is_tiny_vit flag
-        if self.is_tiny_vit and img_emb.dim() == 4:
+        if img_emb.dim() == 4 and img_emb.shape[-1] == self.EMBED_DIM:
             img_emb = img_emb.permute(0, 3, 1, 2)
             
         return img_emb.mean(dim=[2, 3])
