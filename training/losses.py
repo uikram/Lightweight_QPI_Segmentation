@@ -59,7 +59,7 @@ class PhaseMaskContrast(nn.Module):
                   ((1 - pred_mask).sum(dim=[1, 2]) + eps)
 
         loss = F.relu(mu_bg - mu_cell + self.margin)
-        return loss.mean(dim=[1, 2])
+        return loss  # Shape is already (B,)
 
 class MultiClassDiceLoss(nn.Module):
     def __init__(self, num_classes=5, ignore_index=0, weight=None):

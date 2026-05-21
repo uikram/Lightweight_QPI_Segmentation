@@ -328,7 +328,7 @@ def get_qpi_loaders(config, num_workers: int = 4):
         class_weights = 1.0 / class_counts
         
         sample_weights = torch.tensor(
-            [class_weights[ds_for_weights.labels.get(s["stem"], 0)] for s in ds_for_weights.samples]
+            [class_weights[ds_for_weights.labels.get(s["stem"], 1)] for s in ds_for_weights.samples]
         )
         # len(train_ds) ensures we sample the correct amount if debug_mode modified the length
         sampler = WeightedRandomSampler(sample_weights, len(train_ds), replacement=True)
