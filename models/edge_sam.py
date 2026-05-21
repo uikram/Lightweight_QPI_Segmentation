@@ -170,6 +170,7 @@ class EdgeSAMSeg(nn.Module):
         self.encoder = self._build_encoder(pretrained)
 
         # 2. Safely initialize the correct decoder here in __init__
+        # 2. Safely initialize the correct decoder here in __init__
         if isinstance(self.encoder, EdgeEncoder):
             self.decoder = EdgeDecoder(
             encoder_channels=self.encoder.out_channels,
@@ -177,18 +178,25 @@ class EdgeSAMSeg(nn.Module):
             )
             self.use_simple_decoder = False
             
-            # Initialize fallback decoder for official EdgeSAM (which outputs a 256-d tensor)
         else:
-            # The official edge_sam returns a single tensor bottleneck
+            # FIX: Replaced destructive interpolation with a progressive transposed decoder
             bottleneck_dim = self.encoder.out_channels[-1] if hasattr(self.encoder, 'out_channels') else 256
             self.simple_decoder = nn.Sequential(
-                nn.Conv2d(bottleneck_dim, 64, 3, padding=1),
+                nn.ConvTranspose2d(bottleneck_dim, 128, kernel_size=2, stride=2),
+                nn.BatchNorm2d(128),
                 nn.ReLU6(inplace=True),
-                nn.Conv2d(64, self.num_classes, 1)
+                nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2),
+                nn.BatchNorm2d(64),
+                nn.ReLU6(inplace=True),
+                nn.ConvTranspose2d(64, 32, kernel_size=2, stride=2),
+                nn.BatchNorm2d(32),
+                nn.ReLU6(inplace=True),
+                nn.ConvTranspose2d(32, 16, kernel_size=2, stride=2),
+                nn.BatchNorm2d(16),
+                nn.ReLU6(inplace=True),
+                nn.Conv2d(16, self.num_classes, kernel_size=1)
             )
             self.use_simple_decoder = True
-            
-        self._lora_injected = False
 
     def _build_encoder(self, pretrained: bool):
         # [Keep your exact _build_encoder implementation here]

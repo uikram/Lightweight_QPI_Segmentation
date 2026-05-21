@@ -148,8 +148,28 @@ class LoRAConv2d(nn.Module):
         return base_out + lora_out
 
     def merge(self):
-        """Merging Conv2D LoRA layers requires complex tensor contraction."""
-        raise NotImplementedError("Mathematical merging of Conv2d LoRA weights is not implemented. Use LoRALinear for mergeable bottlenecks.")
+        """Mathematically merge the low-rank A and B convolutions into the base weight."""
+        if not self.merged:
+            # weight_A: (r, in_channels, 1, 1)
+            # weight_B: (out_channels, r, kernel_size, kernel_size)
+            weight_A = self.lora_A.weight.data.squeeze(3).squeeze(2) # (r, in_channels)
+            weight_B = self.lora_B.weight.data                       # (out_channels, r, k, k)
+            
+            # Einsum contraction: sum over the rank dimension
+            delta = torch.einsum('o r h w, r i -> o i h w', weight_B, weight_A)
+            
+            self.weight.data += delta * self.scaling
+            self.merged = True
+            
+    def unmerge(self):
+        if self.merged:
+            weight_A = self.lora_A.weight.data.squeeze(3).squeeze(2)
+            weight_B = self.lora_B.weight.data
+            
+            delta = torch.einsum('o r h w, r i -> o i h w', weight_B, weight_A)
+            
+            self.weight.data -= delta * self.scaling
+            self.merged = False
 
     @classmethod
     def from_conv2d(cls, conv: nn.Conv2d, r: int = 4,

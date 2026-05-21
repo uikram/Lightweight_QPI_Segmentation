@@ -160,7 +160,9 @@ class PhysicsAwarePhaseLoss(nn.Module):
                  lambda2: float = 0.05,
                  lambda3: float = 0.1,
                  pmc_margin: float = 0.1,
-                 pv_normalize: bool = False,  # FIX: Changed to False to match Equation 3.5.4
+                 # FIX: Changed to True. Unnormalized volume sums lead to extreme loss values 
+                 # (~10k+) triggering FP16 exploding gradients and flat 0.0 Dice scores.
+                 pv_normalize: bool = True,  
                  class_weights: Optional[list] = None):
         super().__init__()
         self.lambda1 = lambda1
@@ -170,7 +172,6 @@ class PhysicsAwarePhaseLoss(nn.Module):
         weights = class_weights if class_weights is not None else DEFAULT_CLASS_WEIGHTS
         weight_tensor = torch.tensor(weights, dtype=torch.float32)
         
-        # FIX: Renamed from ce_loss to dice_loss to match the manuscript
         self.dice_loss = MultiClassDiceLoss(num_classes=5, ignore_index=None, weight=weight_tensor)
 
         self.pmc_loss = PhaseMaskContrast(margin=pmc_margin)
