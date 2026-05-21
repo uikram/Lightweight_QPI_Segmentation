@@ -29,14 +29,10 @@ class SegmentationEvaluator:
 
                 logits = self.model(images)            # (B, num_classes, H, W)
 
-                # Multi-class → binary for physics-aware segmentation metrics.
-                # argmax selects the predicted class per pixel;
-                # any non-background class (> 0) is treated as cell.
                 pred_classes  = torch.argmax(logits, dim=1)   # (B, H, W)
-                pred_binary   = (pred_classes > 0).long()
-                target_binary = (targets > 0).long()
 
-                self.seg_metrics.update(pred_binary, target_binary, phase_raw)
+                # Pass the raw multi-class tensors (0-4)
+                self.seg_metrics.update(pred_classes, targets, phase_raw)
 
                 for c in range(1, num_classes):
                     pred_c   = (pred_classes == c).long()

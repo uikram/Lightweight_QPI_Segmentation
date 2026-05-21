@@ -161,13 +161,11 @@ class SegmentationTrainer:
 
                 total_loss += loss.item()
 
-                # Convert multi-class prediction → binary (cell vs background)
-                # for the physics-aware binary segmentation metrics.
+                # Physics metrics and binarization are now handled internally
                 pred_classes = torch.argmax(logits, dim=1)     # (B, H, W)
-                pred_binary  = (pred_classes > 0).long()
-                target_binary = (targets > 0).long()
-
-                self.seg_metrics.update(pred_binary, target_binary, phase_raw)
+                
+                # Pass the RAW multi-class tensors (0-4) so the tracker can score morphology!
+                self.seg_metrics.update(pred_classes, targets, phase_raw)
 
         val_loss    = total_loss / len(self.val_loader)
         val_metrics = self.seg_metrics.compute()
