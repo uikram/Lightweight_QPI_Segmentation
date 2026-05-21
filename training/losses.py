@@ -222,11 +222,12 @@ class PhysicsAwarePhaseLoss(nn.Module):
             pred_fg_prob = 1.0 - pred_softmax[:, 0:1, :, :]
             target_binary = (target > 0).long()
 
+            # L_ce is already a scalar, but the physics terms are (B,) tensors now
             L_ce  = self.ce_loss(pred, target).item()
-            L_pmc = self.pmc_loss(pred_fg_prob, phase_map, apply_sigmoid=False).item()
-            L_bga = self.bga_loss(pred_fg_prob, phase_map, apply_sigmoid=False).item()
+            L_pmc = self.pmc_loss(pred_fg_prob, phase_map, apply_sigmoid=False).mean().item()
+            L_bga = self.bga_loss(pred_fg_prob, phase_map, apply_sigmoid=False).mean().item()
             L_pv  = self.pv_loss(pred_fg_prob, target_binary, phase_map,
-                                 apply_sigmoid=False).item()
+                                 apply_sigmoid=False).mean().item()
 
         return {
             "L_ce":   L_ce,
