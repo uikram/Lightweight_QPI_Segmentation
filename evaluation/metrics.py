@@ -33,7 +33,6 @@ class MetricsTracker:
             "training_history":   {},
             "seg_metrics":        {},
             "phase_metrics":      {},
-            "edge_deployment":    {},
         }
 
         self.training_history = {
@@ -125,39 +124,13 @@ class MetricsTracker:
         if "ablation" not in self.metrics:
             self.metrics["ablation"] = {}
         self.metrics["ablation"][ablation_name] = results
-
+# ------------------------------------------------------------------
+    # Latency tracking
     # ------------------------------------------------------------------
-    # Edge deployment metrics
-    # ------------------------------------------------------------------
 
-    def track_edge_deployment(self, latency_results: dict,
-                               battery_capacity_J: float = 39960.0,
-                               inference_rate_hz: float = 10.0):
-        """
-        Track edge deployment feasibility metrics.
-        Compatible with the existing benchmark/run_benchmarking.py format.
-        """
-        mean_ms  = latency_results.get("mean_ms", 0.0)
-        p99_ms   = latency_results.get("p99_ms",  0.0)
-        energy_J = latency_results.get("energy_J", 0.0)
-
-        wcl = p99_ms + 1.0 + 2.0  # p99 + OS jitter + buffer
-        tau_max_ms = 37.77          # from SiL simulation
-
-        inferences_per_charge = battery_capacity_J / energy_J if energy_J > 0 else 0
-        runtime_hr = inferences_per_charge / inference_rate_hz / 3600
-
-        self.metrics["edge_deployment"] = {
-            "latency":           latency_results,
-            "worst_case_ms":     wcl,
-            "satisfies_rt":      bool(wcl <= 1000.0 / inference_rate_hz),
-            "satisfies_stability": bool(wcl < tau_max_ms),
-            "stability_margin_ms": round(tau_max_ms - wcl, 2),
-            "inferences_per_charge": inferences_per_charge,
-            "runtime_hr":        runtime_hr,
-            "runtime_min":       runtime_hr * 60,
-        }
-
+    def track_latency(self, latency_results: dict):
+        """Track standard inference latency metrics."""
+        self.metrics["latency"] = latency_results
     # ------------------------------------------------------------------
     # Timers
     # ------------------------------------------------------------------
@@ -233,11 +206,11 @@ class MetricsTracker:
                 if isinstance(v, float):
                     print(f"  {k}: {v:.4f}")
 
-        edge = self.metrics.get("edge_deployment", {})
-        if edge:
-            print(f"\nEdge Deployment:")
-            print(f"  WCL:             {edge.get('worst_case_ms', 0):.2f} ms")
-            print(f"  RT satisfied:    {edge.get('satisfies_rt', False)}")
-            print(f"  Runtime:         {edge.get('runtime_min', 0):.1f} min/charge")
+        latency = self.metrics.get("latency", {})
+        if latency:
+            print(f"\nLatency Metrics:")
+            print(f"  Mean:            {latency.get('mean_ms', 0):.2f} ms")
+            print(f"  p99:             {latency.get('p99_ms', 0):.2f} ms")
+            print(f"  FPS:             {latency.get('fps', 0):.1f}")
 
         print(f"\n{'='*60}")

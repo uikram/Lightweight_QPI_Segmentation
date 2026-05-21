@@ -62,24 +62,29 @@ class PhaseMaskContrast(nn.Module):
         return loss.mean()
 
 class MultiClassDiceLoss(nn.Module):
-    def __init__(self, num_classes=5, ignore_index=0):
+    def __init__(self, num_classes=5, ignore_index=0, weight=None):
         super().__init__()
         self.num_classes = num_classes
         self.ignore_index = ignore_index
+        # Register weight as a buffer so it automatically moves to the correct device
+        self.register_buffer('weight', weight)
 
     def forward(self, pred, target):
         pred_soft = torch.softmax(pred, dim=1)
         loss = 0.0
-        count = 0
+        weight_sum = 0.0
         for c in range(self.num_classes):
             if c == self.ignore_index:
                 continue
             p = pred_soft[:, c]
             g = (target == c).float()
             intersection = (p * g).sum()
-            loss += 1 - (2 * intersection + 1e-8) / (p.sum() + g.sum() + 1e-8)
-            count += 1
-        return loss / count
+            c_loss = 1 - (2 * intersection + 1e-8) / (p.sum() + g.sum() + 1e-8)
+            
+            w = self.weight[c] if self.weight is not None else 1.0
+            loss += w * c_loss
+            weight_sum += w
+        return loss / (weight_sum + 1e-8)
 
 class BoundaryGradientAlignment(nn.Module):
     """
@@ -185,7 +190,8 @@ class PhysicsAwarePhaseLoss(nn.Module):
         # CrossEntropyLoss for 5-class biology
         weights = class_weights if class_weights is not None else DEFAULT_CLASS_WEIGHTS
         weight_tensor = torch.tensor(weights, dtype=torch.float32)
-        self.ce_loss = MultiClassDiceLoss(num_classes=5, ignore_index=0)
+        # Pass the weight_tensor to the Dice loss
+        self.ce_loss = MultiClassDiceLoss(num_classes=5, ignore_index=0, weight=weight_tensor)
 
         self.pmc_loss = PhaseMaskContrast(margin=pmc_margin)
         self.bga_loss = BoundaryGradientAlignment()
@@ -202,10 +208,6 @@ class PhysicsAwarePhaseLoss(nn.Module):
 
         The CrossEntropyLoss weight tensor must be on the same device as pred.
         """
-        # Move CE weight to device on first forward pass
-        if self.ce_loss.weight is not None and \
-           self.ce_loss.weight.device != pred.device:
-            self.ce_loss.weight = self.ce_loss.weight.to(pred.device)
 
         # 1. Biological classification loss (uses full 0-4 labels)
         L_ce = self.ce_loss(pred, target)
@@ -231,9 +233,6 @@ class PhysicsAwarePhaseLoss(nn.Module):
                             target: torch.Tensor,
                             phase_map: torch.Tensor) -> dict:
         """Return individual loss component values for logging/ablation."""
-        if self.ce_loss.weight is not None and \
-           self.ce_loss.weight.device != pred.device:
-            self.ce_loss.weight = self.ce_loss.weight.to(pred.device)
 
         with torch.no_grad():
             pred_softmax = torch.softmax(pred, dim=1)
@@ -270,9 +269,6 @@ class DiceOnlyLoss(nn.Module):
         )
 
     def forward(self, pred, target, phase_map=None):
-        if self.ce_loss.weight is not None and \
-           self.ce_loss.weight.device != pred.device:
-            self.ce_loss.weight = self.ce_loss.weight.to(pred.device)
         return self.ce_loss(pred, target)
 
 

@@ -101,7 +101,7 @@ class SegmentationTrainer:
                 val_metrics=val_metrics,
             )
 
-            dice   = val_metrics.get("dice", 0.0)
+            dice   = val_metrics.get("mean_dice", 0.0)
             is_best = dice > self.best_dice
             if is_best:
                 self.best_dice = dice
