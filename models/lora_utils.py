@@ -9,6 +9,7 @@ import torch.nn as nn
 import math
 from typing import List, Optional
 
+_HEAD_PATTERNS = ("final_conv", "mask_decoder", "simple_decoder", "prompt")
 
 class LoRALinear(nn.Module):
     """
@@ -160,7 +161,7 @@ class LoRAConv2d(nn.Module):
             
             self.weight.data += delta * self.scaling
             self.merged = True
-            
+
     def unmerge(self):
         if self.merged:
             weight_A = self.lora_A.weight.data.squeeze(3).squeeze(2)
@@ -209,27 +210,17 @@ def inject_lora_into_model(
     strategy: str = "attention_blocks",
     target_module_names: Optional[List[str]] = None,
 ) -> nn.Module:
-    """
-    Inject LoRA into a segmentation model.
-
-    Strategies:
-        encoder_only     – targets Linear layers in encoder blocks
-        attention_blocks – targets q/v projection linears in attention
-        bottleneck       – targets Conv2d layers at bottleneck
-
-    Returns the model with LoRA layers injected and base weights frozen.
-    """
+    
     assert strategy in INSERTION_STRATEGIES, \
         f"strategy must be one of {INSERTION_STRATEGIES}"
 
-    # Freeze all parameters first
+    # Freeze ALL parameters first
     for param in model.parameters():
         param.requires_grad = False
 
     replacements = 0
 
     for name, module in model.named_modules():
-        # Determine whether this module should receive LoRA
         should_inject = _should_inject(name, module, strategy, target_module_names)
 
         if should_inject and isinstance(module, nn.Linear):
@@ -242,8 +233,9 @@ def inject_lora_into_model(
             _replace_module(model, name, lora_layer)
             replacements += 1
 
+    # Unfreeze only the explicit segmentation head layers and prompts.
     for name, param in model.named_parameters():
-        if "dec" in name or "final" in name or "prompt" in name:
+        if any(pat in name for pat in _HEAD_PATTERNS):
             param.requires_grad = True
     
     print(f"[LoRA] Injected {replacements} LoRA layers (strategy={strategy}, r={r})")
@@ -266,8 +258,8 @@ def merge_lora_weights(model: nn.Module) -> nn.Module:
 
 def _should_inject(name: str, module: nn.Module, strategy: str,
                    target_names: Optional[List[str]]) -> bool:
-    # GUARD: Never inject dense LoRA into depthwise convolutions to maintain lightweight edge profile
-    if isinstance(module, nn.Conv2d) and module.groups == module.in_channels and module.in_channels > 1:
+    # Guard against ALL grouped convolutions (groups > 1) to prevent merge() crashes
+    if isinstance(module, nn.Conv2d) and module.groups > 1:
         return False
 
     if target_names is not None:
@@ -277,15 +269,17 @@ def _should_inject(name: str, module: nn.Module, strategy: str,
         return "enc" in name and isinstance(module, (nn.Linear, nn.Conv2d))
 
     if strategy == "attention_blocks":
-        attention_keywords = ["q_proj", "v_proj", "query", "value",
-                              "attn.qkv", "self_attn"]
+        # Removed "proj" to prevent accidental injection into backbone convolutions
+        attention_keywords = [
+            "q_proj", "v_proj", "query", "value",
+            "attn.qkv", "self_attn", "qkv",
+        ]
         return any(kw in name for kw in attention_keywords)
 
     if strategy == "bottleneck":
         return "bottleneck" in name or "neck" in name
 
     return False
-
 
 def _replace_module(model: nn.Module, name: str, new_module: nn.Module):
     """Safely replace a module, handling both named attributes and sequential indices."""

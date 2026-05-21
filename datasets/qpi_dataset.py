@@ -102,7 +102,7 @@ class QPIDataset(Dataset):
         if augment and split == "train":
             self.transform = QPIAugmentation(
                 flip_h=True, flip_v=True, rotate=True,
-                translate=True, zoom=False, normalize=True
+                translate=True, normalize=True
             )
         else:
             self.transform = QPIValTransform()

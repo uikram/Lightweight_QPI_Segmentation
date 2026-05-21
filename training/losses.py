@@ -26,28 +26,26 @@ DEFAULT_CLASS_WEIGHTS = [0.5, 1.0, 1.5, 2.0, 2.0]
 
 # ---------------------------------------------------------------------------
 class PhaseMaskContrast(nn.Module):
-    """
-    Phase-Mask Contrast Loss.
-    Enforces that predicted cell regions have higher phase values
-    than the surrounding background.
-
-    L_PMC = max(0, μ_background - μ_cell + margin)
-
-    apply_sigmoid: set False when pred is already a probability map [0,1].
-    """
-
     def __init__(self, margin: float = 0.1):
         super().__init__()
         self.margin = margin
+        # FIX: Safely initialize tracking variables in __init__
+        self._pmc_warn_count = 0
 
     def forward(self, pred: torch.Tensor, phase_map: torch.Tensor,
                 apply_sigmoid: bool = True) -> torch.Tensor:
-        """
-        pred:      (B, 1, H, W) logits  OR  foreground probabilities [0,1]
-        phase_map: (B, 1, H, W) raw phase values (radians, unnormalized)
-        """
+        
         pred_mask = torch.sigmoid(pred).squeeze(1) if apply_sigmoid else pred.squeeze(1)
         phase     = phase_map.squeeze(1)
+
+        # Diagnostic: throttled warning for degenerate all-foreground collapse.
+        if self.training and self._pmc_warn_count < 3:
+            fg_ratio = pred_mask.mean().item()
+            if fg_ratio > 0.85:
+                self._pmc_warn_count += 1
+                print(f"\n[Warning] PMC: fg_ratio={fg_ratio:.2%}. "
+                      f"Possible degenerate collapse. "
+                      f"({self._pmc_warn_count}/3 warnings)")
 
         cell_area = pred_mask.sum(dim=[1, 2]).clamp(min=1.0)
         bg_area   = (1 - pred_mask).sum(dim=[1, 2]).clamp(min=1.0)
@@ -98,10 +96,21 @@ class BoundaryGradientAlignment(nn.Module):
         dy = x[:, :, 1:, :] - x[:, :, :-1, :]
         dx = F.pad(dx, (0, 1), mode="constant", value=0.0)
         dy = F.pad(dy, (0, 0, 0, 1), mode="constant", value=0.0)
-        
-        # SUPERIOR FIX: 1e-4 is safely above the FP16 subnormal threshold (~6.1e-5)
-        # Prevents the derivative of sqrt(0) from going to Infinity.
         return torch.sqrt(dx ** 2 + dy ** 2 + 1e-4)
+
+    def forward(self, pred: torch.Tensor, phase_map: torch.Tensor,
+                apply_sigmoid: bool = True) -> torch.Tensor:
+        
+        pred_prob = torch.sigmoid(pred) if apply_sigmoid else pred
+
+        grad_mask  = self._spatial_gradient(pred_prob)
+        grad_phase = self._spatial_gradient(phase_map)
+
+        # Per-sample max-normalisation to [0, 1] to fix gradient scaling mismatch
+        grad_mask_norm  = grad_mask  / (grad_mask.amax(dim=[1, 2, 3],  keepdim=True) + 1e-8)
+        grad_phase_norm = grad_phase / (grad_phase.amax(dim=[1, 2, 3], keepdim=True) + 1e-8)
+
+        return F.l1_loss(grad_mask_norm, grad_phase_norm, reduction='none').mean(dim=[1, 2, 3])
 
     def forward(self, pred: torch.Tensor, phase_map: torch.Tensor,
                 apply_sigmoid: bool = True) -> torch.Tensor:

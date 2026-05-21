@@ -58,8 +58,15 @@ def load_config_from_yaml(yaml_path: str, model_name: str = None) -> SimpleNames
     # ── Training defaults ──────────────────────────────────────────────────────
     if not hasattr(config, 'batch_size'):
         config.batch_size = 8
-    if not hasattr(config, 'num_epochs'):
+        
+    if hasattr(config, 'epochs') and not hasattr(config, 'num_epochs'):
+        config.num_epochs = config.epochs
+    elif hasattr(config, 'num_epochs') and not hasattr(config, 'epochs'):
+        config.epochs = config.num_epochs
+    elif not hasattr(config, 'num_epochs') and not hasattr(config, 'epochs'):
         config.num_epochs = 50
+        config.epochs = 50
+
     if not hasattr(config, 'num_classes'):
         config.num_classes = 5
 
