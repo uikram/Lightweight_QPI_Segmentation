@@ -162,9 +162,10 @@ class EdgeSAMSeg(nn.Module):
     Output: (B, num_classes, H, W) – segmentation logits
     """
 
-    def __init__(self, num_classes: int = 1, pretrained: bool = False):
+    def __init__(self, num_classes: int = 1, pretrained: bool = False, image_size: int = 1024):
         super().__init__()
         self.num_classes = num_classes
+        self.image_size = image_size
 
         self.encoder = self._build_encoder(pretrained)
 
@@ -195,6 +196,8 @@ class EdgeSAMSeg(nn.Module):
                 nn.Conv2d(16, self.num_classes, kernel_size=1)
             )
             self.use_simple_decoder = True
+            
+        self._lora_injected = False
 
     def _build_encoder(self, pretrained: bool):
         try:
@@ -251,29 +254,30 @@ class EdgeSAMSeg(nn.Module):
             return EdgeEncoder()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        orig_size = x.shape[2:]
-
-        # Only resize to 1024 if using the official pretrained SAM encoder
-        if hasattr(self, 'use_sam_encoder') and self.use_sam_encoder and x.shape[-1] != 1024:
-            x_enc = F.interpolate(x, size=(1024, 1024), mode="bilinear", align_corners=False)
-        elif not hasattr(self, 'use_sam_encoder') and x.shape[-1] != 1024:
-             # Fallback if use_sam_encoder isn't defined
-             x_enc = F.interpolate(x, size=(1024, 1024), mode="bilinear", align_corners=False)
+        original_size = x.shape[2:]
+        
+        # 1. Resize input to expected native resolution
+        if x.shape[-1] != self.image_size or x.shape[-2] != self.image_size:
+            x_enc = F.interpolate(x, size=(self.image_size, self.image_size),
+                                  mode="bilinear", align_corners=False)
         else:
             x_enc = x
 
-        # [DELETED DOUBLE NORMALIZATION HERE]
-
         skips = self.encoder(x_enc)
         
-        if not self.use_simple_decoder:
-            logits = self.decoder(*skips)
+        # 2. Gate the decoder based on which encoder was successfully loaded
+        if self.use_simple_decoder:
+            # Official EdgeSAM encoder returns a single tensor (or a tuple where we want the last element)
+            feat = skips[-1] if isinstance(skips, (tuple, list)) else skips
+            logits = self.simple_decoder(feat)
         else:
-            features = skips if not isinstance(skips, tuple) else skips[-1]
-            logits = self.simple_decoder(features)
-
-        if logits.shape[2:] != orig_size:
-            logits = F.interpolate(logits, size=orig_size, mode="bilinear", align_corners=False)
+            # Fallback EdgeEncoder returns exactly 5 feature maps expected by EdgeDecoder
+            logits = self.decoder(*skips)
+        
+        # 3. Ensure output matches original input spatial size
+        if logits.shape[2:] != original_size:
+            logits = F.interpolate(logits, size=original_size,
+                                   mode="bilinear", align_corners=False)
         return logits
 
     def inject_lora(self, r: int = 4, lora_alpha: float = 1.0,
@@ -292,11 +296,11 @@ class EdgeSAMSeg(nn.Module):
 
     def encode_image(self, x: torch.Tensor) -> torch.Tensor:
         """Feature extraction for evaluation."""
+        if x.shape[-1] != self.image_size or x.shape[-2] != self.image_size:
+            x = F.interpolate(x, size=(self.image_size, self.image_size),
+                              mode="bilinear", align_corners=False)
         skips = self.encoder(x)
-        # FIX: Check if tuple vs single tensor
-        if isinstance(skips, tuple):
-            return skips[-1].mean(dim=[2, 3])
-        return skips.mean(dim=[2, 3])
+        return skips[-1].mean(dim=[2, 3])
 
     def count_parameters(self):
         total     = sum(p.numel() for p in self.parameters())

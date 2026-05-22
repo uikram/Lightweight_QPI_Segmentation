@@ -188,9 +188,13 @@ class SegmentationTrainer:
                 targets   = batch["mask"].to(self.device)
                 phase_raw = batch.get("phase_raw", images).to(self.device)
 
+                # 1. Run the forward pass IN mixed precision for speed
                 with self._autocast():
                     logits = self.model(images)
-                    loss   = self.criterion(logits, targets, phase_raw)
+                
+                # 2. Run the loss calculation OUTSIDE autocast in FP32 to prevent NaNs
+                # We explicitly cast logits and phase_raw to .float() here
+                loss = self.criterion(logits.float(), targets, phase_raw.float())
 
                 total_loss += loss.item()
 

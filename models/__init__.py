@@ -34,7 +34,9 @@ def get_model(model_name: str, config):
                              image_size=image_size)
 
     elif model_name == "edge_sam":
-        model = EdgeSAMSeg(num_classes=num_classes, pretrained=pretrained)
+        image_size = getattr(config, "image_size", 1024)
+        model = EdgeSAMSeg(num_classes=num_classes, pretrained=pretrained,
+                           image_size=image_size)
 
     else:
         raise ValueError(
