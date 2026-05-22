@@ -9,7 +9,15 @@ import torch.nn as nn
 import math
 from typing import List, Optional
 
-_HEAD_PATTERNS = ("final_conv", "mask_decoder", "simple_decoder", "prompt")
+_HEAD_PATTERNS = (
+    "final_conv", 
+    "mask_decoder", 
+    "simple_decoder", 
+    "prompt",
+    "dec",          
+    "decoder",     
+    "final_up"    
+)
 
 class LoRALinear(nn.Module):
     """
@@ -237,6 +245,14 @@ def inject_lora_into_model(
     for name, param in model.named_parameters():
         if any(pat in name for pat in _HEAD_PATTERNS):
             param.requires_grad = True
+            
+    # [CRITICAL FIX: UNFREEZE NORMALIZATION FOR DOMAIN ADAPTATION]
+    for module in model.modules():
+        if isinstance(module, (nn.BatchNorm2d, nn.LayerNorm, nn.GroupNorm)):
+            if hasattr(module, 'weight') and module.weight is not None:
+                module.weight.requires_grad = True
+            if hasattr(module, 'bias') and module.bias is not None:
+                module.bias.requires_grad = True
     
     print(f"[LoRA] Injected {replacements} LoRA layers (strategy={strategy}, r={r})")
     _print_trainable_parameters(model)
@@ -277,7 +293,8 @@ def _should_inject(name: str, module: nn.Module, strategy: str,
         return any(kw in name for kw in attention_keywords)
 
     if strategy == "bottleneck":
-        return "bottleneck" in name or "neck" in name
+        # [CRITICAL FIX: Added 'blocks' and 'stage' to target official EdgeSAM/RepViT]
+        return any(k in name for k in ["bottleneck", "neck", "blocks", "stage"])
 
     return False
 
