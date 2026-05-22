@@ -41,13 +41,7 @@ def init_environment(args, override_rank=None):
     # If sweeping, dynamically override the rank and directories in memory
     if override_rank is not None:
         config.lora_r = override_rank
-        
-        # Apply the architecture-aware scaling logic during sweeps!
-        if getattr(config, 'architecture', '') == "mobile_sam":
-            config.lora_alpha = 4.0 * override_rank
-        else:
-            config.lora_alpha = float(override_rank)
-            
+        config.lora_alpha = float(override_rank)  # Override alpha BEFORE the model is built
         base_dir = getattr(config, 'results_dir', Path('results'))
         # Create separate output folders for each rank (e.g., results_dir_r8)
         config.results_dir = Path(f"{str(base_dir)}_r{override_rank}")
@@ -115,9 +109,11 @@ def run_sweep(args):
     for r in args.ranks:
         print(f"\n\n>>>>> TRAINING WITH LORA RANK: {r} <<<<<")
         
-        # Initialize everything with the overridden rank (scaling is handled securely inside)
+        # Initialize everything with the overridden rank
         model, config = init_environment(args, override_rank=r)
         
+        # Override lora_alpha dynamically to keep the LoRA scaling ratio (alpha/r) equal to 1.0
+        config.lora_alpha = float(r)
         metrics_tracker = MetricsTracker(f"{config.architecture}_r{r}", config.results_dir)
         trainer = SegmentationTrainer(model, config, metrics_tracker)
         trainer.train()

@@ -100,18 +100,4 @@ def load_config_from_yaml(yaml_path: str, model_name: str = None) -> SimpleNames
     if not hasattr(config, 'k_shots') or config.k_shots is None:
         config.k_shots = [1, 2, 4, 8, 16]
 
-    # ── Dynamic LoRA Scaling Adjustment ────────────────────────────────────────
-    # Automatically enforce the optimal LoRA scaling ratio based on the architecture.
-    # This prevents vanishing gradients during hyperparameter sweeps.
-    if hasattr(config, 'architecture') and hasattr(config, 'lora_r'):
-        if config.architecture == "mobile_sam":
-            # MobileSAM uses ViT attention blocks, requiring a 4.0x scaling factor
-            config.lora_alpha = 4.0 * config.lora_r
-            print(f"[Config] MobileSAM detected: dynamically set lora_alpha to {config.lora_alpha} (Scale=4.0)")
-        
-        elif config.architecture == "edge_sam" or config.architecture == "mobilenet_unet":
-            # EdgeSAM and MobileNet-UNet use CNN blocks, requiring a 1.0x scaling factor
-            config.lora_alpha = float(config.lora_r)
-            print(f"[Config] {config.architecture} detected: dynamically set lora_alpha to {config.lora_alpha} (Scale=1.0)")
-
     return config

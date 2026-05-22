@@ -14,7 +14,7 @@ _HEAD_PATTERNS = (
     "mask_decoder", 
     "simple_decoder", 
     "prompt",
-    "dec",          
+    "outc",          
     "final_up"    
 )
 

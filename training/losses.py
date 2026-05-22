@@ -191,9 +191,9 @@ class PhysicsAwarePhaseLoss(nn.Module):
         
         # 5. Apply physics losses ONLY if the patch contains cells
         if has_cells.sum() > 0:
-            L_pmc = (L_pmc * has_cells).sum() / has_cells.sum()
-            L_bga = (L_bga * has_cells).sum() / has_cells.sum()
-            L_pv  = (L_pv * has_cells).sum() / has_cells.sum()
+            L_pmc = (L_pmc * has_cells).sum() / (has_cells.sum() + 1e-8)
+            L_bga = (L_bga * has_cells).sum() / (has_cells.sum() + 1e-8)
+            L_pv  = (L_pv * has_cells).sum() / (has_cells.sum() + 1e-8)
         else:
             L_pmc = L_bga = L_pv = 0.0
 
@@ -217,9 +217,9 @@ class PhysicsAwarePhaseLoss(nn.Module):
             L_pv  = self.pv_loss(pred_fg_prob, target_binary, phase_map, apply_sigmoid=False)
 
             if has_cells.sum() > 0:
-                L_pmc = ((L_pmc * has_cells).sum() / has_cells.sum()).item()
-                L_bga = ((L_bga * has_cells).sum() / has_cells.sum()).item()
-                L_pv  = ((L_pv * has_cells).sum() / has_cells.sum()).item()
+                L_pmc = ((L_pmc * has_cells).sum() / (has_cells.sum() + 1e-8)).item()
+                L_bga = ((L_bga * has_cells).sum() / (has_cells.sum() + 1e-8)).item()
+                L_pv  = ((L_pv * has_cells).sum() / (has_cells.sum() + 1e-8)).item()
             else:
                 L_pmc = L_bga = L_pv = 0.0
 
