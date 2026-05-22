@@ -118,7 +118,7 @@ class SegmentationTrainer:
                     ckpt_path,
                 )
                 print(f"  -> Best model saved (Dice: {self.best_dice:.4f})")
-                
+
         self.metrics.save_metrics()
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -131,10 +131,12 @@ class SegmentationTrainer:
         total_L_pmc = 0.0
         total_L_bga = 0.0
         total_L_pv = 0.0
+        comp_count = 0  # <--- ADDED: Track how many times we logged components
         
         pbar = tqdm(self.train_loader, desc="  Train", leave=False)
 
-        for batch in pbar:
+        # <--- ADDED: enumerate to get the step number
+        for step, batch in enumerate(pbar):
             images    = batch["phase"].to(self.device)
             targets   = batch["mask"].to(self.device)
             phase_raw = batch.get("phase_raw", images).to(self.device)
@@ -151,22 +153,25 @@ class SegmentationTrainer:
 
             total_loss += loss.item()
             
-            # Extract and add individual loss values
-            if hasattr(self.criterion, 'get_loss_components'):
+            # <--- ADDED: Only log components every 10 steps to save compute
+            if hasattr(self.criterion, 'get_loss_components') and step % 10 == 0:
                 comps = self.criterion.get_loss_components(logits, targets, phase_raw)
                 total_L_dice += comps.get("L_dice", 0.0)
                 total_L_pmc  += comps.get("L_pmc", 0.0)
                 total_L_bga  += comps.get("L_bga", 0.0)
                 total_L_pv   += comps.get("L_pv", 0.0)
+                comp_count   += 1
 
             pbar.set_postfix({"loss": f"{loss.item():.4f}"})
 
         num_batches = len(self.train_loader)
+        safe_count = max(comp_count, 1)  # <--- ADDED: Safe denominator
+        
         components_avg = {
-            "L_dice": total_L_dice / num_batches,
-            "L_pmc": total_L_pmc / num_batches,
-            "L_bga": total_L_bga / num_batches,
-            "L_pv": total_L_pv / num_batches,
+            "L_dice": total_L_dice / safe_count,
+            "L_pmc": total_L_pmc / safe_count,
+            "L_bga": total_L_bga / safe_count,
+            "L_pv": total_L_pv / safe_count,
         }
         
         return total_loss / num_batches, components_avg

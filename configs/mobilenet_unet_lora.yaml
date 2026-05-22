@@ -3,8 +3,6 @@ experiment_name: "mobilenet_unet_lora_qpi"
 # Root directory containing X_train/, Y_train/, X_val/, Y_val/
 data_root: "./dataset"
 
-class_weights: [0.5, 1.0, 1.5, 2.0, 2.0]
-
 cache_dir: "./cache"
 
 dataset:

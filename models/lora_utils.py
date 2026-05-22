@@ -15,7 +15,6 @@ _HEAD_PATTERNS = (
     "simple_decoder", 
     "prompt",
     "dec",          
-    "decoder",     
     "final_up"    
 )
 
@@ -293,8 +292,9 @@ def _should_inject(name: str, module: nn.Module, strategy: str,
         return any(kw in name for kw in attention_keywords)
 
     if strategy == "bottleneck":
-        # [CRITICAL FIX: Added 'blocks' and 'stage' to target official EdgeSAM/RepViT]
-        return any(k in name for k in ["bottleneck", "neck", "blocks", "stage"])
+        # "bottleneck" targets the fallback EdgeEncoder's self.bottleneck
+        # "neck" targets the official RepViT's self.neck
+        return any(k in name for k in ["bottleneck", "neck"])
 
     return False
 
