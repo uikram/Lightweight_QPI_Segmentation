@@ -255,25 +255,28 @@ class EdgeSAMSeg(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         orig_size = x.shape[2:]
 
-        # SAM foundation models are heavily calibrated for 1024x1024
         if x.shape[-1] != 1024:
             x_enc = F.interpolate(x, size=(1024, 1024), mode="bilinear", align_corners=False)
         else:
             x_enc = x
 
+        # Normalize to [0,1] range for the pretrained RepViT encoder
+        # Phase maps are already per-image normalized by QPIValTransform,
+        # but RepViT expects values in a stable range
+        x_min = x_enc.amin(dim=[1,2,3], keepdim=True)
+        x_max = x_enc.amax(dim=[1,2,3], keepdim=True)
+        x_enc = (x_enc - x_min) / (x_max - x_min + 1e-8)
+
         skips = self.encoder(x_enc)
         
-        # Route to the appropriate registered decoder
         if not self.use_simple_decoder:
             logits = self.decoder(*skips)
         else:
-            features = skips[-1] if isinstance(skips, tuple) else skips
+            features = skips if not isinstance(skips, tuple) else skips[-1]
             logits = self.simple_decoder(features)
 
-        # Restore back to original dataset resolution
         if logits.shape[2:] != orig_size:
             logits = F.interpolate(logits, size=orig_size, mode="bilinear", align_corners=False)
-            
         return logits
 
     def inject_lora(self, r: int = 4, lora_alpha: float = 1.0,
