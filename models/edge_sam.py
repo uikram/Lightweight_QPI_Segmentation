@@ -166,20 +166,18 @@ class EdgeSAMSeg(nn.Module):
         super().__init__()
         self.num_classes = num_classes
 
-        # 1. Build the encoder
         self.encoder = self._build_encoder(pretrained)
 
-        # 2. Safely initialize the correct decoder here in __init__
-        # 2. Safely initialize the correct decoder here in __init__
+        # Track which encoder path was loaded so forward() can gate the resize correctly
+        self.use_sam_encoder = not isinstance(self.encoder, EdgeEncoder)
+
         if isinstance(self.encoder, EdgeEncoder):
             self.decoder = EdgeDecoder(
-            encoder_channels=self.encoder.out_channels,
-            num_classes=num_classes,
+                encoder_channels=self.encoder.out_channels,
+                num_classes=num_classes,
             )
             self.use_simple_decoder = False
-            
         else:
-            # FIX: Replaced destructive interpolation with a progressive transposed decoder
             bottleneck_dim = self.encoder.out_channels[-1] if hasattr(self.encoder, 'out_channels') else 256
             self.simple_decoder = nn.Sequential(
                 nn.ConvTranspose2d(bottleneck_dim, 128, kernel_size=2, stride=2),
@@ -255,17 +253,16 @@ class EdgeSAMSeg(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         orig_size = x.shape[2:]
 
-        if x.shape[-1] != 1024:
+        # Only resize to 1024 if using the official pretrained SAM encoder
+        if hasattr(self, 'use_sam_encoder') and self.use_sam_encoder and x.shape[-1] != 1024:
             x_enc = F.interpolate(x, size=(1024, 1024), mode="bilinear", align_corners=False)
+        elif not hasattr(self, 'use_sam_encoder') and x.shape[-1] != 1024:
+             # Fallback if use_sam_encoder isn't defined
+             x_enc = F.interpolate(x, size=(1024, 1024), mode="bilinear", align_corners=False)
         else:
             x_enc = x
 
-        # Normalize to [0,1] range for the pretrained RepViT encoder
-        # Phase maps are already per-image normalized by QPIValTransform,
-        # but RepViT expects values in a stable range
-        x_min = x_enc.amin(dim=[1,2,3], keepdim=True)
-        x_max = x_enc.amax(dim=[1,2,3], keepdim=True)
-        x_enc = (x_enc - x_min) / (x_max - x_min + 1e-8)
+        # [DELETED DOUBLE NORMALIZATION HERE]
 
         skips = self.encoder(x_enc)
         

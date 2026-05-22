@@ -252,7 +252,18 @@ def inject_lora_into_model(
                 module.weight.requires_grad = True
             if hasattr(module, 'bias') and module.bias is not None:
                 module.bias.requires_grad = True
-    
+                
+    # ==============================================================
+    # ADD THIS BLOCK: Unfreeze the modified 1-channel QPI stem
+    # ==============================================================
+    for module in model.modules():
+        if isinstance(module, nn.Conv2d) and module.in_channels == 1:
+            if hasattr(module, 'weight') and module.weight is not None:
+                module.weight.requires_grad = True
+            if hasattr(module, 'bias') and module.bias is not None:
+                module.bias.requires_grad = True
+    # ==============================================================
+
     print(f"[LoRA] Injected {replacements} LoRA layers (strategy={strategy}, r={r})")
     _print_trainable_parameters(model)
     return model
@@ -281,10 +292,11 @@ def _should_inject(name: str, module: nn.Module, strategy: str,
         return any(t in name for t in target_names)
 
     if strategy == "encoder_only":
-        return "enc" in name and isinstance(module, (nn.Linear, nn.Conv2d))
+        # FIX: Added "features", "blocks", "neck", "stage" to catch EdgeSAM/MobileSAM architectures
+        valid_names = ["enc", "features", "blocks", "neck", "stage", "patch_embed"]
+        return any(k in name for k in valid_names) and isinstance(module, (nn.Linear, nn.Conv2d))
 
     if strategy == "attention_blocks":
-        # Removed "proj" to prevent accidental injection into backbone convolutions
         attention_keywords = [
             "q_proj", "v_proj", "query", "value",
             "attn.qkv", "self_attn", "qkv",
@@ -292,8 +304,6 @@ def _should_inject(name: str, module: nn.Module, strategy: str,
         return any(kw in name for kw in attention_keywords)
 
     if strategy == "bottleneck":
-        # "bottleneck" targets the fallback EdgeEncoder's self.bottleneck
-        # "neck" targets the official RepViT's self.neck
         return any(k in name for k in ["bottleneck", "neck"])
 
     return False
