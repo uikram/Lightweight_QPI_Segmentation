@@ -112,21 +112,6 @@ class BoundaryGradientAlignment(nn.Module):
 
         return F.l1_loss(grad_mask_norm, grad_phase_norm, reduction='none').mean(dim=[1, 2, 3])
 
-    def forward(self, pred: torch.Tensor, phase_map: torch.Tensor,
-                apply_sigmoid: bool = True) -> torch.Tensor:
-        """
-        pred:      (B, 1, H, W) logits  OR  foreground probabilities [0,1]
-        phase_map: (B, 1, H, W) raw phase values
-        """
-        pred_prob = torch.sigmoid(pred) if apply_sigmoid else pred
-
-        grad_mask  = self._spatial_gradient(pred_prob)
-        grad_phase = self._spatial_gradient(phase_map)
-
-        # Removed 'grad_phase_max' to strictly match manuscript Equation 3.5.3
-        return F.l1_loss(grad_mask, grad_phase, reduction='none').mean(dim=[1, 2, 3])
-
-
 class PhaseVolumePreservation(nn.Module):
     def __init__(self, normalize: bool = True, epsilon: float = 1e-4):
         super().__init__()
