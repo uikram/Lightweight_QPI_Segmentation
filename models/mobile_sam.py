@@ -96,11 +96,19 @@ class MobileSAMSeg(nn.Module):
     def _build_encoder(self, pretrained: bool) -> nn.Module:
         try:
             from mobile_sam import sam_model_registry
-            sam = sam_model_registry["vit_t"](checkpoint=None)
+            import os
+            
+            ckpt_path = "weights/mobile_sam.pt"
+            if pretrained and os.path.exists(ckpt_path):
+                sam = sam_model_registry["vit_t"](checkpoint=ckpt_path)
+                print(f"[MobileSAM] Loaded pretrained weights from {ckpt_path}")
+            else:
+                sam = sam_model_registry["vit_t"](checkpoint=None)
+                print("[WARNING] No MobileSAM checkpoint found. Initializing with RANDOM weights!")
+
             encoder = sam.image_encoder
 
             # Locate the patch embedding convolution
-            # Standard SAM uses .proj, MobileSAM (TinyViT) uses .seq[0].c
             if hasattr(encoder.patch_embed, 'proj'):
                 orig_proj = encoder.patch_embed.proj
                 is_tiny_vit = False
@@ -130,7 +138,6 @@ class MobileSAMSeg(nn.Module):
             else:
                 encoder.patch_embed.proj = new_proj
 
-            print("[MobileSAM] Loaded TinyViT encoder from mobile_sam package.")
             return encoder
 
         except ImportError:

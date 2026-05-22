@@ -199,10 +199,19 @@ class EdgeSAMSeg(nn.Module):
             self.use_simple_decoder = True
 
     def _build_encoder(self, pretrained: bool):
-        # [Keep your exact _build_encoder implementation here]
         try:
             from edge_sam import sam_model_registry
-            sam     = sam_model_registry["edge_sam"](checkpoint=None)
+            import os
+            
+            # FIX 1: Explicitly load the pretrained checkpoint
+            ckpt_path = "weights/edge_sam_3x.pth"
+            if pretrained and os.path.exists(ckpt_path):
+                sam = sam_model_registry["edge_sam"](checkpoint=ckpt_path)
+                print(f"[EdgeSAM] Loaded pretrained weights from {ckpt_path}")
+            else:
+                sam = sam_model_registry["edge_sam"](checkpoint=None)
+                print("[WARNING] No checkpoint found. Initializing with RANDOM weights!")
+
             encoder = sam.image_encoder
 
             first_conv_name = None
@@ -244,19 +253,27 @@ class EdgeSAMSeg(nn.Module):
             return EdgeEncoder()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        skips = self.encoder(x)
+        orig_size = x.shape[2:]
+
+        # SAM foundation models are heavily calibrated for 1024x1024
+        if x.shape[-1] != 1024:
+            x_enc = F.interpolate(x, size=(1024, 1024), mode="bilinear", align_corners=False)
+        else:
+            x_enc = x
+
+        skips = self.encoder(x_enc)
         
         # Route to the appropriate registered decoder
         if not self.use_simple_decoder:
             logits = self.decoder(*skips)
         else:
-            # FIX: Safely unpack the bottleneck features if skips is a tuple
             features = skips[-1] if isinstance(skips, tuple) else skips
             logits = self.simple_decoder(features)
 
-        if logits.shape[2:] != x.shape[2:]:
-            logits = F.interpolate(logits, size=x.shape[2:],
-                                   mode="bilinear", align_corners=False)
+        # Restore back to original dataset resolution
+        if logits.shape[2:] != orig_size:
+            logits = F.interpolate(logits, size=orig_size, mode="bilinear", align_corners=False)
+            
         return logits
 
     def inject_lora(self, r: int = 4, lora_alpha: float = 1.0,
