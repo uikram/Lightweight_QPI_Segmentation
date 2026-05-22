@@ -56,12 +56,15 @@ class SegmentationTrainer:
         # Dynamically handle local architecture (MPS) vs Server GPU (CUDA)
         device_type = 'cuda' if 'cuda' in str(self.device) else ('mps' if 'mps' in str(self.device) else 'cpu')
         
+        # GradScaler throws RuntimeError on MPS, disable scaling for Mac testing
+        use_scaler = use_fp16 and (device_type == 'cuda')
+        
         try:
-            self.scaler = torch.amp.GradScaler(device_type, enabled=use_fp16)
+            self.scaler = torch.amp.GradScaler(device_type, enabled=use_scaler)
             self._autocast = lambda: torch.amp.autocast(device_type, enabled=use_fp16)
-        except (TypeError, AttributeError):
+        except (TypeError, AttributeError, RuntimeError):
             # PyTorch < 2.0 fallback (assumes CUDA)
-            self.scaler = torch.cuda.amp.GradScaler(enabled=use_fp16)
+            self.scaler = torch.cuda.amp.GradScaler(enabled=use_scaler)
             self._autocast = lambda: torch.cuda.amp.autocast(enabled=use_fp16)
 
         # ── Checkpointing ─────────────────────────────────────────────────────
@@ -110,6 +113,7 @@ class SegmentationTrainer:
             is_best = dice > self.best_dice
             if is_best:
                 self.best_dice = dice
+                self.best_metrics = val_metrics  # Fix: Cache the class-level breakdown
                 ckpt_path = self.checkpoint_dir / "best_model.pt"
                 torch.save(
                     {"epoch": epoch + 1,
@@ -118,6 +122,10 @@ class SegmentationTrainer:
                     ckpt_path,
                 )
                 print(f"  -> Best model saved (Dice: {self.best_dice:.4f})")
+
+        # Fix: Push the detailed class breakdown into the tracker payload before saving
+        if hasattr(self, 'best_metrics'):
+            self.metrics.track_seg_metrics("val_best", self.best_metrics)
 
         self.metrics.save_metrics()
 
@@ -184,24 +192,18 @@ class SegmentationTrainer:
 
         with torch.no_grad():
             for batch in tqdm(self.val_loader, desc="  Val  ", leave=False):
-                images    = batch["phase"].to(self.device)
+                # Fix: Force FP32 inputs to bypass EdgeSAM FP16 eval() overflows
+                images    = batch["phase"].to(self.device).float()
                 targets   = batch["mask"].to(self.device)
-                phase_raw = batch.get("phase_raw", images).to(self.device)
+                phase_raw = batch.get("phase_raw", images).to(self.device).float()
 
-                # 1. Run the forward pass IN mixed precision for speed
-                with self._autocast():
-                    logits = self.model(images)
-                
-                # 2. Run the loss calculation OUTSIDE autocast in FP32 to prevent NaNs
-                # We explicitly cast logits and phase_raw to .float() here
-                loss = self.criterion(logits.float(), targets, phase_raw.float())
+                # Fix: Run entirely outside of autocast context for validation
+                logits = self.model(images)
+                loss = self.criterion(logits, targets, phase_raw)
 
                 total_loss += loss.item()
 
-                # Physics metrics and binarization are now handled internally
                 pred_classes = torch.argmax(logits, dim=1)     # (B, H, W)
-                
-                # Pass the RAW multi-class tensors (0-4) so the tracker can score morphology!
                 self.seg_metrics.update(pred_classes, targets, phase_raw)
 
         val_loss    = total_loss / len(self.val_loader)

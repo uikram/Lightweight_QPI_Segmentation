@@ -195,7 +195,10 @@ class PhysicsAwarePhaseLoss(nn.Module):
             L_bga = (L_bga * has_cells).sum() / (has_cells.sum() + 1e-8)
             L_pv  = (L_pv * has_cells).sum() / (has_cells.sum() + 1e-8)
         else:
-            L_pmc = L_bga = L_pv = 0.0
+            # Fix: Keep fallback values as tensors on the correct device
+            L_pmc = torch.tensor(0.0, device=pred.device)
+            L_bga = torch.tensor(0.0, device=pred.device)
+            L_pv  = torch.tensor(0.0, device=pred.device)
 
         return L_dice + self.lambda1 * L_pmc + self.lambda2 * L_bga + self.lambda3 * L_pv
 
@@ -250,12 +253,17 @@ class DiceOnlyLoss(nn.Module):
 # ---------------------------------------------------------------------------
 def get_loss(config) -> nn.Module:
     loss_type = getattr(config, "loss_type", "physics_aware")
+    
+    # Safely extract nested block if it exists
+    loss_weights = getattr(config, "loss_weights", {})
+    if not isinstance(loss_weights, dict):
+        loss_weights = {}
 
     if loss_type == "physics_aware":
         return PhysicsAwarePhaseLoss(
-            lambda1=getattr(config, "lambda1_pmc", 0.1),
-            lambda2=getattr(config, "lambda2_bga", 0.05),
-            lambda3=getattr(config, "lambda3_pv",  0.1),
+            lambda1=loss_weights.get("lambda1_pmc", getattr(config, "lambda1_pmc", 0.1)),
+            lambda2=loss_weights.get("lambda2_bga", getattr(config, "lambda2_bga", 0.05)),
+            lambda3=loss_weights.get("lambda3_pv",  getattr(config, "lambda3_pv", 0.1)),
             pmc_margin=getattr(config, "pmc_margin", 0.1),
             class_weights=getattr(config, "class_weights", None),
         )
