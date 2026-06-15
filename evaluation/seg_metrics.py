@@ -46,6 +46,7 @@ class SegmentationMetrics:
         self._boundary_tp = 0.0
         self._boundary_fp = 0.0
         self._boundary_fn = 0.0
+        self._phase_vol_errors_per_class = {c: [] for c in range(1, self.num_classes)} #Added after LORA_FIX_2
         self._phase_vol_errors: List[float] = []
         self._latencies: List[float]        = []
         self._n_samples = 0
@@ -85,11 +86,20 @@ class SegmentationMetrics:
             self._boundary_fp += bfp
             self._boundary_fn += bfn
 
-            # Phase volume error (Must use binary masks, not class IDs!)
+            # Phase volume error
             if phase_raw is not None:
                 ph = phase_raw[i].cpu().numpy() if torch.is_tensor(phase_raw) else phase_raw[i]
-                pv_error = _phase_volume_error(p_binary, t_binary, ph)
-                self._phase_vol_errors.append(pv_error)
+                
+                # Keep binary (global) calculation
+                pv_error_global = _phase_volume_error(p_binary, t_binary, ph)
+                self._phase_vol_errors.append(pv_error_global)
+
+                # Add per-class calculation
+                for c in range(1, self.num_classes):
+                    t_c = (t == c).astype(np.uint8)
+                    if t_c.any():
+                        p_c = (p == c).astype(np.uint8)
+                        self._phase_vol_errors_per_class[c].append(_phase_volume_error(p_c, t_c, ph))
 
     def compute(self) -> Dict[str, float]:
         eps = 1e-8
@@ -114,10 +124,14 @@ class SegmentationMetrics:
             "bf1":       float(bf1),
         }
         
-        # Add per-class logging
+        # Add per-class volume error inside the classes loop
         classes = ["discocyte", "echinocyte", "spherocyte", "stomatocyte"]
         for c_idx, c_name in enumerate(classes, start=1):
             results[f"dice_{c_name}"] = float(dice_per_class[c_idx])
+            
+            class_vols = self._phase_vol_errors_per_class[c_idx]
+            if class_vols:
+                results[f"phase_vol_error_{c_name}"] = float(np.mean(class_vols))
 
         if self._phase_vol_errors:
             results["phase_vol_error"] = float(np.mean(self._phase_vol_errors))

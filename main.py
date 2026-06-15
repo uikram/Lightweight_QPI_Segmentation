@@ -118,7 +118,33 @@ def run_sweep(args):
         trainer = SegmentationTrainer(model, config, metrics_tracker)
         trainer.train()
         print(f"Finished training for rank {r}.")
+        # ==========================================
+        # AUTOMATIC EVALUATION BLOCK
+        # ==========================================
+        print(f"\n{'='*40}\nAUTOMATIC EVALUATION FOR RANK: {r}\n{'='*40}")
         
+        # 1. Load the best weights that were just saved by the trainer
+        best_model_path = config.checkpoint_dir / "best_model.pt"
+        if best_model_path.exists():
+            ckpt = torch.load(best_model_path, map_location=config.device)
+            model.load_state_dict(ckpt.get("model_state", ckpt))
+            print(f"[Sweep Eval] Loaded best checkpoint from {best_model_path}")
+        else:
+            print("[Sweep Eval] Warning: No checkpoint found. Evaluating with current weights.")
+            
+        model.eval()
+
+        # 2. Get the evaluation dataloader
+        _, val_loader, test_loader = get_qpi_loaders(config, num_workers=getattr(config, 'num_workers', 4))
+        eval_loader = test_loader if test_loader is not None else val_loader
+
+        if eval_loader is not None:
+            config.lora_rank = r  # Ensure evaluate.py has the rank for the CSV naming
+            evaluator = SegmentationEvaluator(model, config)
+            metrics = evaluator.evaluate(eval_loader)
+            print(f"\nSweep Evaluation Complete for rank {r}.")
+        else:
+            print("No evaluation data found. Skipping evaluation.")
         # Critical: Free up GPU memory before starting the next rank
         del model
         del trainer

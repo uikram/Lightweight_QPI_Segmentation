@@ -206,13 +206,22 @@ class EdgeSAMSeg(nn.Module):
             
             # FIX 1: Explicitly load the pretrained checkpoint
             ckpt_path = "weights/edge_sam_3x.pth"
-            if pretrained and os.path.exists(ckpt_path):
+            # if pretrained and os.path.exists(ckpt_path):
+            #     sam = sam_model_registry["edge_sam"](checkpoint=ckpt_path)
+            #     print(f"[EdgeSAM] Loaded pretrained weights from {ckpt_path}")
+            # else:
+            #     sam = sam_model_registry["edge_sam"](checkpoint=None)
+            #     print("[WARNING] No checkpoint found. Initializing with RANDOM weights!")
+            if pretrained:
+                if not os.path.exists(ckpt_path):
+                    raise FileNotFoundError(
+                        f"EdgeSAM checkpoint not found at {ckpt_path}. "
+                        f"LoRA adaptation requires pretrained weights."
+                    )
                 sam = sam_model_registry["edge_sam"](checkpoint=ckpt_path)
                 print(f"[EdgeSAM] Loaded pretrained weights from {ckpt_path}")
             else:
                 sam = sam_model_registry["edge_sam"](checkpoint=None)
-                print("[WARNING] No checkpoint found. Initializing with RANDOM weights!")
-
             encoder = sam.image_encoder
 
             first_conv_name = None

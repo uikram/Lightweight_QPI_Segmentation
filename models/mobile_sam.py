@@ -99,12 +99,17 @@ class MobileSAMSeg(nn.Module):
             import os
             
             ckpt_path = "weights/mobile_sam.pt"
-            if pretrained and os.path.exists(ckpt_path):
-                sam = sam_model_registry["vit_t"](checkpoint=ckpt_path)
+            
+            if pretrained:
+                if not os.path.exists(ckpt_path):
+                    raise FileNotFoundError(
+                        f"MobileSAM checkpoint not found at {ckpt_path}. "
+                        f"LoRA adaptation requires pretrained weights."
+                    )
+                sam = sam_model_registry["vit_t"](checkpoint=ckpt_path) # Assuming vit_t registry
                 print(f"[MobileSAM] Loaded pretrained weights from {ckpt_path}")
             else:
                 sam = sam_model_registry["vit_t"](checkpoint=None)
-                print("[WARNING] No MobileSAM checkpoint found. Initializing with RANDOM weights!")
 
             encoder = sam.image_encoder
 
