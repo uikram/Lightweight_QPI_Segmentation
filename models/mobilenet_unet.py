@@ -124,6 +124,10 @@ class MobileNetUNet(nn.Module):
                     lora_dropout: float = 0.0, strategy: str = "encoder_only"):
         inject_lora_into_model(self, r=r, lora_alpha=lora_alpha,
                                lora_dropout=lora_dropout, strategy=strategy)
+        # Forcefully unfreeze all decoder, upsampling, and final projection layers
+        for name, param in self.named_parameters():
+            if any(substring in name for substring in ["dec", "up", "final"]):
+                param.requires_grad = True
         self._lora_injected = True
         return self
 
