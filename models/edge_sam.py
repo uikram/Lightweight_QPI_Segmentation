@@ -204,14 +204,8 @@ class EdgeSAMSeg(nn.Module):
             from edge_sam import sam_model_registry
             import os
             
-            # FIX 1: Explicitly load the pretrained checkpoint
             ckpt_path = "weights/edge_sam_3x.pth"
-            # if pretrained and os.path.exists(ckpt_path):
-            #     sam = sam_model_registry["edge_sam"](checkpoint=ckpt_path)
-            #     print(f"[EdgeSAM] Loaded pretrained weights from {ckpt_path}")
-            # else:
-            #     sam = sam_model_registry["edge_sam"](checkpoint=None)
-            #     print("[WARNING] No checkpoint found. Initializing with RANDOM weights!")
+            
             if pretrained:
                 if not os.path.exists(ckpt_path):
                     raise FileNotFoundError(
@@ -219,9 +213,11 @@ class EdgeSAMSeg(nn.Module):
                         f"LoRA adaptation requires pretrained weights."
                     )
                 sam = sam_model_registry["edge_sam"](checkpoint=ckpt_path)
-                print(f"[EdgeSAM] Loaded pretrained weights from {ckpt_path}")
+                ckpt_status = ckpt_path
             else:
                 sam = sam_model_registry["edge_sam"](checkpoint=None)
+                ckpt_status = "None (Random Weights)"
+                
             encoder = sam.image_encoder
 
             first_conv_name = None
@@ -254,12 +250,19 @@ class EdgeSAMSeg(nn.Module):
             setattr(parent_module, first_conv_name, new_conv)
             
             encoder.out_channels = [64, 128, 256, 512, 256]
-            print("[EdgeSAM] Loaded official EdgeSAM encoder.")
+            
+            # FINAL REFINEMENT: Dynamic encoder class and safe placement
+            print(f"[EdgeSAM] Using OFFICIAL EdgeSAM implementation")
+            print(f"[EdgeSAM] Source: edge_sam package")
+            print(f"[EdgeSAM] Model class: {encoder.__class__.__name__}")
+            print(f"[EdgeSAM] Checkpoint: {ckpt_status}")
+            
             return encoder
 
         except Exception as e:
-            print(f"\n[EdgeSAM] Failed to load official EdgeSAM because: {e}")
-            print("[EdgeSAM] Falling back to built-in EdgeEncoder.")
+            print(f"[EdgeSAM] WARNING: Official EdgeSAM not loaded")
+            print(f"[EdgeSAM] Falling back to built-in EdgeEncoder")
+            print(f"[EdgeSAM] Reason: {str(e)}")
             return EdgeEncoder()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

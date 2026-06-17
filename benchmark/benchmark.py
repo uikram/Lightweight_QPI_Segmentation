@@ -1,10 +1,6 @@
 """
 Comprehensive Benchmarking Script for QPI Segmentation Models.
-Implements Section 4.4 of the Research Plan:
-- LoRA Rank Sweep Benchmarking
-- FP16 vs FP32 Inference Comparison
-- TensorRT Acceleration Analysis
-- Peak Memory and Parameter Counting
+Implements Section 4.4, 4.5, and 5 of the Research Plan.
 """
 
 import torch
@@ -13,6 +9,7 @@ import time
 import argparse
 import sys
 import gc
+import random
 import numpy as np
 import pandas as pd
 from pathlib import Path
@@ -21,10 +18,10 @@ sys.path.append(str(Path(__file__).parent.parent))
 
 from models import get_model
 from utils.config import load_config_from_yaml
+from datasets.qpi_dataset import get_qpi_loaders
 
-LATENCY_WARMUP_RUNS = 50
-LATENCY_RUNS        = 200
-
+LATENCY_WARMUP_RUNS = 20
+LATENCY_RUNS        = 100
 
 def force_cleanup():
     gc.collect()
@@ -32,186 +29,247 @@ def force_cleanup():
         torch.cuda.empty_cache()
         torch.cuda.synchronize()
 
+def get_hardware_info():
+    """Logs system hardware and software versions for paper reproducibility."""
+    return {
+        "gpu_name": torch.cuda.get_device_name(0) if torch.cuda.is_available() else "CPU",
+        "pytorch_ver": torch.__version__,
+        "cuda_ver": torch.version.cuda if torch.cuda.is_available() else "N/A",
+        "cudnn_ver": str(torch.backends.cudnn.version()) if torch.backends.cudnn.is_available() else "N/A"
+    }
 
-def compile_tensorrt(model, dummy_input, precision):
-    """Compiles the PyTorch model to TensorRT for edge acceleration analysis."""
+def get_parameter_breakdown(model, model_name):
+    """Robustly splits parameters into Encoder and Decoder using explicit object references."""
+    model_name = model_name.lower()
+    enc_params_set = set()
+    
+    # Safely aggregate explicit encoder parameters
+    if hasattr(model, 'encoder'):
+        enc_params_set.update(model.encoder.parameters())
+    elif model_name == "mobilenet_unet":
+        for i in range(6):
+            enc_module = getattr(model, f'enc{i}', None)
+            if enc_module is not None:
+                enc_params_set.update(enc_module.parameters())
+
+    enc_total, enc_trainable = 0, 0
+    dec_total, dec_trainable = 0, 0
+    
+    for param in model.parameters():
+        num_params = param.numel()
+        is_trainable = param.requires_grad
+        
+        if param in enc_params_set:
+            enc_total += num_params
+            if is_trainable: enc_trainable += num_params
+        else:
+            dec_total += num_params
+            if is_trainable: dec_trainable += num_params
+            
+    overall_total = enc_total + dec_total
+    overall_trainable = enc_trainable + dec_trainable
+    
+    return {
+        "enc_total": enc_total,
+        "enc_trainable": enc_trainable,
+        "enc_trainable_ratio_%": (enc_trainable / enc_total * 100) if enc_total > 0 else 0,
+        "dec_total": dec_total,
+        "dec_trainable": dec_trainable,
+        "dec_trainable_ratio_%": (dec_trainable / dec_total * 100) if dec_total > 0 else 0,
+        "overall_total": overall_total,
+        "overall_trainable": overall_trainable,
+        "overall_trainable_ratio_%": (overall_trainable / overall_total * 100) if overall_total > 0 else 0
+    }
+
+def compile_tensorrt(model, dummy_input, precision, workspace_gb):
     try:
         import torch_tensorrt
         print("  -> Compiling model with Torch-TensorRT...")
         trt_dtype = torch.half if precision == 'fp16' else torch.float
         
-        # TensorRT compilation
         trt_model = torch_tensorrt.compile(
             model,
             inputs=[torch_tensorrt.Input(dummy_input.shape, dtype=trt_dtype)],
             enabled_precisions={trt_dtype},
-            workspace_size=1 << 30  # 1 GB workspace
+            workspace_size=int(workspace_gb * (1 << 30))
         )
         return trt_model
-    except ImportError:
-        print("  -> [ERROR] torch_tensorrt not installed. Skipping TensorRT compilation.")
-        print("     Install via: pip install torch-tensorrt")
-        return None
     except Exception as e:
         print(f"  -> [ERROR] TensorRT compilation failed: {e}")
         return None
 
-
-def measure_latency_and_memory(model, dummy_input, device):
-    """Measures inference latency (ms) and peak GPU memory (MB)."""
+def measure_latency_and_memory(model, test_images, device):
     model.eval()
-
-    # Warmup
-    for _ in range(LATENCY_WARMUP_RUNS):
+    
+    for i in range(LATENCY_WARMUP_RUNS):
+        img = test_images[i % len(test_images)]
         with torch.no_grad():
-            model(dummy_input)
+            model(img)
+            
     if device != 'cpu':
         torch.cuda.synchronize()
-
-    # Reset memory stats before benchmark window
-    if device != 'cpu':
         torch.cuda.reset_peak_memory_stats()
 
     timings = []
-    for _ in range(LATENCY_RUNS):
+    for i in range(LATENCY_RUNS):
+        img = test_images[i % len(test_images)]
+        
         if device != 'cpu':
             torch.cuda.synchronize()
+            
         start = time.perf_counter()
-        
         with torch.no_grad():
-            model(dummy_input)
+            model(img)
             
         if device != 'cpu':
             torch.cuda.synchronize()
+            
         timings.append((time.perf_counter() - start) * 1000)
 
     timings_arr  = np.array(timings)
-    peak_mem_mb  = (torch.cuda.max_memory_allocated() / (1024 ** 2)
-                    if device != 'cpu' else 0.0)
+    peak_alloc_mb = (torch.cuda.max_memory_allocated() / (1024 ** 2)) if device != 'cpu' else 0.0
+    peak_reserved_mb = (torch.cuda.max_memory_reserved() / (1024 ** 2)) if device != 'cpu' else 0.0
 
     return {
-        "mean_ms":        float(np.mean(timings_arr)),
-        "std_ms":         float(np.std(timings_arr)),
-        "p50_ms":         float(np.percentile(timings_arr, 50)),
-        "p99_ms":         float(np.percentile(timings_arr, 99)),
-        "fps":            float(1000.0 / np.mean(timings_arr)),
-        "peak_memory_mb": float(peak_mem_mb),
+        "latency_mean_ms": float(np.mean(timings_arr)),
+        "latency_p50_ms":  float(np.percentile(timings_arr, 50)),
+        "latency_p99_ms":  float(np.percentile(timings_arr, 99)),
+        "fps":             float(1000.0 / np.mean(timings_arr)),
+        "peak_allocated_mb": peak_alloc_mb,
+        "peak_reserved_mb":  peak_reserved_mb
     }
 
-
-def run_benchmark_scenario(config_path, rank, precision, use_trt, device='cuda', checkpoint_dir=None):
-    """Runs a specific benchmarking scenario, loading trained weights if available."""
+def run_benchmark_scenario(config_path, rank, precision, use_trt, device, checkpoint_dir, trt_workspace):
     config = load_config_from_yaml(config_path)
     config.device = device
+    config.batch_size = 1 
     
-    # Inject specific LoRA rank for this sweep
-    config.lora_r = rank
-    config.lora_alpha = float(rank)
+    if rank == 0:
+        config.lora_r = None 
+    else:
+        config.lora_r = rank
+        config.lora_alpha = float(rank)
 
     arch_lower = config.architecture.lower()
     arch_upper = config.architecture.upper()
-    scenario_name = f"{arch_upper} | r={rank} | {precision.upper()} | TRT={use_trt}"
+    scenario_name = f"{arch_upper} | r={'FULL' if rank==0 else rank} | {precision.upper()} | TRT={use_trt}"
     print(f"\nBenchmarking: {scenario_name}")
     print("-" * 65)
 
-    # 1. Initialize the base structural model configuration
-    model = get_model(config.architecture, config)
-    
-    # 2. Automatically locate and load your trained checkpoint if requested
+    # 1. Fetch metrics from the exact folder structure established in trainer_seg.py
+    val_metrics = {}
     if checkpoint_dir:
-        # Resolves to e.g., results/edge_sam_lora_r2
-        cp_dir = Path(checkpoint_dir) / f"{arch_lower}_lora_r{rank}"
+        rank_str = f"r{rank}" if rank > 0 else "full"
+        cp_dir = Path(checkpoint_dir) / f"{arch_lower}_lora_{rank_str}"
         
-        # Look specifically for best_model.pt inside the directory tree (handles the checkpoints/ subfolder)
-        checkpoint_path = None
-        for path in cp_dir.rglob("best_model.pt"):
-            checkpoint_path = path
+        metrics_file = None
+        for p in cp_dir.rglob("metrics.json"):
+            metrics_file = p
             break
-                
-        if checkpoint_path and checkpoint_path.exists():
-            print(f"  -> Loading trained weights from: {checkpoint_path}")
-            try:
-                state_dict = torch.load(checkpoint_path, map_location=device)
-                
-                # Unpack the dictionary saved by trainer_seg.py
-                if "model_state" in state_dict:
-                    state_dict = state_dict["model_state"]
-                    
-                # strict=False safely loads the weights into the structural architecture
-                missing, unexpected = model.load_state_dict(state_dict, strict=False)
-                if len(unexpected) == 0:
-                    print("     Weights matched structural architecture successfully.")
-                else:
-                    print(f"     Loaded with partial match (Unexpected keys found).")
-            except Exception as e:
-                print(f"  -> [Warning] Failed to load checkpoint weights: {e}")
-        else:
-            print(f"  -> [Notice] No best_model.pt found in {cp_dir}. Benchmarking structural baseline.")
+            
+        if metrics_file and metrics_file.exists():
+            with open(metrics_file, 'r') as f:
+                data = json.load(f)
+                val_best = data.get("seg_metrics", {}).get("val_best", {})
+                val_metrics = {
+                    "mean_dice": val_best.get("mean_dice"),
+                    "mean_iou": val_best.get("mean_iou"),
+                    "aji": val_best.get("aji"),
+                    "bf1": val_best.get("bf1"),
+                    "phase_vol_error": val_best.get("phase_vol_error")
+                }
+            print(f"  -> Accuracy metrics loaded from {metrics_file.parent.name}")
 
+    # 2. Build Model
+    model = get_model(config.architecture, config)
     model.to(device)
     
-    # 3. Merge LoRA weights into base weights for zero-latency overhead inference
-    if hasattr(model, 'merge_lora'):
+    # --- EXPLICIT ENCODER LOGGING FOR VERIFICATION ---
+    if hasattr(model, 'encoder'):
+        print(f"  -> [VERIFICATION] Encoder Type: {type(model.encoder)}")
+    else:
+        print(f"  -> [VERIFICATION] No unified 'encoder' module (Expected for MobileNetUNet)")
+    # -------------------------------------------------
+    
+    # 3. Param counts BEFORE merge
+    param_stats = get_parameter_breakdown(model, arch_lower)
+
+    # 4. Merge LoRA for zero-latency overhead inference
+    if hasattr(model, 'merge_lora') and rank > 0:
         try:
             model.merge_lora()
             print("  -> LoRA weights merged for zero-latency benchmarking.")
         except NotImplementedError:
-            print("  -> LoRA merge skipped (Conv2d layers; slight structural overhead retained).")
+            pass
 
-    # 4. Handle precision casting
+    # 5. Fetch and Randomly Sample Validation Images
+    _, val_loader, _ = get_qpi_loaders(config, num_workers=0)
+    all_val_images = []
+    for batch in val_loader:
+        all_val_images.append(batch["phase"])
+        
+    random.seed(42) # Reproducibility
+    total_needed = LATENCY_WARMUP_RUNS + LATENCY_RUNS
+    sampled_images = random.sample(all_val_images, min(total_needed, len(all_val_images)))
+    
+    test_images = []
+    for img in sampled_images:
+        img = img.to(device)
+        if precision == 'fp16':
+            img = img.half()
+        test_images.append(img)
+        
     if precision == 'fp16':
         model = model.half()
-        dummy_input = torch.randn(1, 1, getattr(config, 'image_size', 256), getattr(config, 'image_size', 256), device=device).half()
-        print("  -> Converted model and inputs to FP16.")
-    else:
-        dummy_input = torch.randn(1, 1, getattr(config, 'image_size', 256), getattr(config, 'image_size', 256), device=device)
 
-    # 5. Compile TensorRT if requested
+    # 6. TensorRT Compilation
     if use_trt:
-        trt_model = compile_tensorrt(model, dummy_input, precision)
+        trt_model = compile_tensorrt(model, test_images[0], precision, trt_workspace)
         if trt_model is not None:
             model = trt_model
         else:
-            print("  -> Falling back to standard PyTorch execution.")
-            use_trt = False # Update flag if compilation failed
+            use_trt = False 
 
-    # Count parameters (Original PyTorch model parameters)
-    total_params     = sum(p.numel() for p in model.parameters()) if not use_trt else "N/A (TRT)"
-    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad) if not use_trt else "N/A"
+    # 7. Execute Benchmark
+    stats = measure_latency_and_memory(model, test_images, device)
 
-    # Run Benchmark
-    stats = measure_latency_and_memory(model, dummy_input, device)
+    print(f"  Encoder Trainable: {param_stats['enc_trainable_ratio_%']:.2f}% | Overall: {param_stats['overall_trainable_ratio_%']:.2f}%")
+    print(f"  Mean latency     : {stats['latency_mean_ms']:.2f} ms")
+    print(f"  FPS              : {stats['fps']:.1f}")
+    if device != 'cpu':
+        print(f"  Peak Reserved    : {stats['peak_reserved_mb']:.1f} MB")
 
-    print(f"  Total params : {total_params}")
-    print(f"  Mean latency : {stats['mean_ms']:.2f} ms")
-    print(f"  P99 latency  : {stats['p99_ms']:.2f} ms")
-    print(f"  FPS          : {stats['fps']:.1f}")
-    print(f"  Peak memory  : {stats['peak_memory_mb']:.1f} MB")
-
-    stats.update({
+    combined_stats = {
         "architecture": arch_upper,
-        "lora_r": rank,
+        "device": device.upper(),
+        "lora_r": "FULL" if rank == 0 else rank,
         "precision": precision.upper(),
         "tensorrt": use_trt,
-        "total_params": total_params,
-        "trainable_params": trainable_params,
-        "image_size": getattr(config, 'image_size', 256)
-    })
+    }
+    
+    combined_stats.update(get_hardware_info()) # Append Hardware Meta
+    combined_stats.update(param_stats) 
+    combined_stats.update(val_metrics) 
+    combined_stats.update(stats)       
 
     del model
-    del dummy_input
+    del test_images
     force_cleanup()
-    return stats
-
+    return combined_stats
 
 if __name__ == "__main__":
+    # Optimize cuDNN for hardware
+    if torch.cuda.is_available():
+        torch.backends.cudnn.benchmark = True
+        
     parser = argparse.ArgumentParser()
     parser.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu')
     parser.add_argument('--output_dir', default='results/benchmarks')
-    parser.add_argument('--train_results_dir', default=None, help="Path to your trained model directories (e.g., 'results')")
-    parser.add_argument('--ranks', type=int, nargs='+', default=[2, 4, 8, 16, 32], help="LoRA ranks to benchmark")
-    parser.add_argument('--precisions', type=str, nargs='+', default=['fp32', 'fp16'], help="Precisions to benchmark")
-    parser.add_argument('--trt', action='store_true', help="Run TensorRT compilation and benchmarking")
+    parser.add_argument('--train_results_dir', default='results')
+    parser.add_argument('--ranks', type=int, nargs='+', default=[0, 2, 4, 8, 16, 32])
+    parser.add_argument('--precisions', type=str, nargs='+', default=['fp32', 'fp16'])
+    parser.add_argument('--trt', action='store_true')
+    parser.add_argument('--trt_workspace', type=float, default=1.0)
     args = parser.parse_args()
 
     configs_to_test = [
@@ -222,49 +280,38 @@ if __name__ == "__main__":
 
     all_results = []
     
-    # Nested loops executing Section 4.4 requirements
     for cfg_path in configs_to_test:
         if not Path(cfg_path).exists():
-            print(f"Warning: {cfg_path} not found. Skipping.")
             continue
             
         for rank in args.ranks:
             for precision in args.precisions:
-                # 1. Benchmark Standard PyTorch (FP32 or FP16)
-                stats = run_benchmark_scenario(
-                    config_path=cfg_path, 
-                    rank=rank, 
-                    precision=precision, 
-                    use_trt=False, 
-                    device=args.device,
-                    checkpoint_dir=args.train_results_dir
-                )
+                if args.device == 'cpu' and precision == 'fp16':
+                    continue 
+                    
+                stats = run_benchmark_scenario(cfg_path, rank, precision, False, args.device, args.train_results_dir, args.trt_workspace)
                 all_results.append(stats)
                 
-                # 2. Benchmark TensorRT (if requested)
                 if args.trt and args.device == 'cuda':
-                    trt_stats = run_benchmark_scenario(
-                        config_path=cfg_path, 
-                        rank=rank, 
-                        precision=precision, 
-                        use_trt=True, 
-                        device=args.device,
-                        checkpoint_dir=args.train_results_dir
-                    )
+                    trt_stats = run_benchmark_scenario(cfg_path, rank, precision, True, args.device, args.train_results_dir, args.trt_workspace)
                     all_results.append(trt_stats)
 
-    # Save to JSON
     out_dir  = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     
-    json_file = out_dir / "hardware_benchmark_sweep.json"
-    with open(json_file, 'w') as f:
-        json.dump(all_results, f, indent=4)
-        
-    # Save to CSV for easy copy-pasting into LaTeX/Excel for the paper
-    csv_file = out_dir / "hardware_benchmark_sweep.csv"
+    csv_file = out_dir / f"hardware_benchmark_{args.device}.csv"
     df = pd.DataFrame(all_results)
+    
+    # Priority sorting for the final output CSV
+    cols = df.columns.tolist()
+    headline_cols = [
+        "architecture", "device", "gpu_name", "lora_r", "precision", "tensorrt", 
+        "enc_trainable_ratio_%", "dec_trainable_ratio_%", "overall_trainable_ratio_%",
+        "mean_dice", "bf1", "phase_vol_error", 
+        "latency_mean_ms", "fps", "peak_allocated_mb", "peak_reserved_mb"
+    ]
+    ordered_cols = [c for c in headline_cols if c in cols] + [c for c in cols if c not in headline_cols]
+    df = df[ordered_cols]
+    
     df.to_csv(csv_file, index=False)
-
-    print(f"\n[DONE] Results saved to {out_dir}")
-    print("CSV generated for easy LaTeX table formatting.")
+    print(f"\n[DONE] Trade-off CSV generated at {csv_file}")

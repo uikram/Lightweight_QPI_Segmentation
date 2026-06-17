@@ -107,9 +107,10 @@ class MobileSAMSeg(nn.Module):
                         f"LoRA adaptation requires pretrained weights."
                     )
                 sam = sam_model_registry["vit_t"](checkpoint=ckpt_path) # Assuming vit_t registry
-                print(f"[MobileSAM] Loaded pretrained weights from {ckpt_path}")
+                ckpt_status = ckpt_path
             else:
                 sam = sam_model_registry["vit_t"](checkpoint=None)
+                ckpt_status = "None (Random Weights)"
 
             encoder = sam.image_encoder
 
@@ -143,10 +144,18 @@ class MobileSAMSeg(nn.Module):
             else:
                 encoder.patch_embed.proj = new_proj
 
+            # FINAL REFINEMENT: Dynamic encoder class and safe placement
+            print(f"[MobileSAM] Using OFFICIAL MobileSAM implementation")
+            print(f"[MobileSAM] Source: mobile_sam package")
+            print(f"[MobileSAM] Model class: {encoder.__class__.__name__}")
+            print(f"[MobileSAM] Checkpoint: {ckpt_status}")
+
             return encoder
 
-        except ImportError:
-            print("[MobileSAM] mobile_sam not installed. Using fallback CNN encoder.")
+        except Exception as e:
+            print(f"[MobileSAM] WARNING: Official MobileSAM not loaded")
+            print(f"[MobileSAM] Falling back to built-in CNN encoder")
+            print(f"[MobileSAM] Reason: {str(e)}")
             return self._fallback_encoder()
 
     def _fallback_encoder(self) -> nn.Module:
