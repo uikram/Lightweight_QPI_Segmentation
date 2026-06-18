@@ -67,6 +67,17 @@ def plot_morphology_trends(csv_path, output_dir):
     plt.savefig(output_dir / "trend_population_shift.png", dpi=300, bbox_inches='tight')
     plt.close()
 
+    # Violin plot for Projected Area Distribution to show class separation
+    if not df.empty and 'area' in df.columns:
+        plt.figure(figsize=(10, 6))
+        sns.violinplot(data=df, x='Cell Type', y='area', palette=PALETTE, inner='quartile')
+        plt.title("Projected Area Distribution by Morphology Class", fontweight='bold', pad=15)
+        plt.xlabel('Predicted Morphology', fontweight='bold')
+        plt.ylabel('Projected Area (pixels)', fontweight='bold')
+        plt.tight_layout()
+        plt.savefig(output_dir / "dist_area_violin.png", dpi=300, bbox_inches='tight')
+        plt.close()
+
 # ==========================================
 # 2. INDIVIDUAL TRAINING PLOTTING (JSONs)
 # ==========================================
@@ -188,7 +199,7 @@ def plot_global_ablation_and_tradeoffs(results_path, output_dir):
         df_ablation = df_ablation.sort_values('Rank')
         df_ablation['Rank_str'] = df_ablation['Rank'].astype(str) 
         
-        # [PREVIOUS] Plot 1: Rank vs. Dice
+        # Plot 1: Rank vs. Dice
         plt.figure(figsize=(8, 6))
         sns.lineplot(data=df_ablation, x='Rank_str', y='Mean Dice', hue='Architecture', marker='o', linewidth=2.5)
         plt.title("Effect of LoRA Rank on Segmentation Accuracy", fontweight='bold')
@@ -198,7 +209,7 @@ def plot_global_ablation_and_tradeoffs(results_path, output_dir):
         plt.savefig(output_dir / "ablation_rank_vs_dice.png", dpi=300)
         plt.close()
 
-        # [NEW] Plot 2: Rank vs. Boundary F1 (Physics Quality)
+        # Plot 2: Rank vs. Boundary F1 (Physics Quality)
         plt.figure(figsize=(8, 6))
         sns.lineplot(data=df_ablation, x='Rank_str', y='Boundary F1', hue='Architecture', marker='o', linewidth=2.5)
         plt.title("Effect of LoRA Rank on Boundary Preservation", fontweight='bold')
@@ -208,7 +219,7 @@ def plot_global_ablation_and_tradeoffs(results_path, output_dir):
         plt.savefig(output_dir / "ablation_rank_vs_boundary_f1.png", dpi=300)
         plt.close()
 
-        # [PREVIOUS] Plot 3: Rank vs. Phase Vol Error
+        # Plot 3: Rank vs. Phase Vol Error
         plt.figure(figsize=(8, 6))
         sns.lineplot(data=df_ablation, x='Rank_str', y='Phase Vol Error', hue='Architecture', marker='o', linewidth=2.5)
         plt.title("Effect of LoRA Rank on Phase Preservation", fontweight='bold')
@@ -218,7 +229,7 @@ def plot_global_ablation_and_tradeoffs(results_path, output_dir):
         plt.savefig(output_dir / "ablation_rank_vs_phase_error.png", dpi=300)
         plt.close()
 
-        # [NEW] Plot 4: The Optimal Configuration Comparison (Grouped Bar Chart for Rank 8)
+        # Plot 4: The Optimal Configuration Comparison (Grouped Bar Chart for Rank 8)
         df_optimal = df_ablation[df_ablation['Rank'] == 8].copy()
         if not df_optimal.empty:
             df_melted = df_optimal.melt(
@@ -238,7 +249,7 @@ def plot_global_ablation_and_tradeoffs(results_path, output_dir):
             plt.savefig(output_dir / "comparison_optimal_models_rank8.png", dpi=300)
             plt.close()
 
-        # [PREVIOUS] Plot 5: Trainable % vs Dice (Parameter Efficiency)
+        # Plot 5: Trainable % vs Dice (Parameter Efficiency)
         plt.figure(figsize=(8, 6))
         sns.scatterplot(data=df_ablation, x='Trainable %', y='Mean Dice', hue='Architecture', size='Rank', sizes=(50, 250), alpha=0.8)
         plt.title("Parameter Efficiency Trade-off", fontweight='bold')
@@ -249,35 +260,84 @@ def plot_global_ablation_and_tradeoffs(results_path, output_dir):
         plt.savefig(output_dir / "ablation_trainable_vs_dice.png", dpi=300, bbox_inches='tight')
         plt.close()
 
+        # Plot 6: Spatial Accuracy vs. Physical Fidelity Correlation
+        plt.figure(figsize=(8, 6))
+        sns.scatterplot(data=df_ablation, x='Mean Dice', y='Phase Vol Error', hue='Architecture', size='Rank', sizes=(50, 250), alpha=0.8)
+        plt.title("Spatial Accuracy vs. Physical Fidelity", fontweight='bold')
+        plt.xlabel("Mean Dice Score (Higher is Better)")
+        plt.ylabel("Relative Phase Volume Error (Lower is Better)")
+        
+        # Add a conceptual "Ideal Zone" annotation
+        plt.axhline(y=df_ablation['Phase Vol Error'].median(), color='gray', linestyle='--', alpha=0.5)
+        plt.axvline(x=df_ablation['Mean Dice'].median(), color='gray', linestyle='--', alpha=0.5)
+        plt.text(df_ablation['Mean Dice'].max(), df_ablation['Phase Vol Error'].min(), 'Optimal Edge', horizontalalignment='right', verticalalignment='bottom', color='green', weight='bold')
+
+        plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+        plt.tight_layout()
+        plt.savefig(output_dir / "correlation_dice_vs_phase.png", dpi=300, bbox_inches='tight')
+        plt.close()
+
     # 3.2 Accuracy vs Efficiency Trade-offs (If Benchmark CSV exists)
     bench_csv = list(results_path.rglob("hardware_benchmark*.csv"))
     if bench_csv:
         df_bench = pd.read_csv(bench_csv[0])
         
-        # [PREVIOUS] FPS vs Dice Pareto Front
+        # FPS vs Dice Pareto Front
         plt.figure(figsize=(9, 6))
-        sns.scatterplot(data=df_bench, x='fps', y='mean_dice', hue='architecture', style='tensorrt', s=150, alpha=0.8)
+        # FIXED: Changed style='tensorrt' to style='onnx'
+        sns.scatterplot(data=df_bench, x='fps', y='mean_dice', hue='architecture', style='onnx', s=150, alpha=0.8)
         plt.title("Accuracy vs. Efficiency Trade-off", fontweight='bold')
         plt.xlabel("Inference Speed (FPS)")
         plt.ylabel("Mean Dice")
-        plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left', title="Arch / TensorRT")
+        # FIXED: Changed title from 'TensorRT' to 'ONNX'
+        plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left', title="Arch / ONNX")
         plt.tight_layout()
         plt.savefig(output_dir / "tradeoff_fps_vs_dice.png", dpi=300, bbox_inches='tight')
         plt.close()
 
-        # [NEW] Trainable Parameters vs. FPS Scatter
+        # Trainable Parameters vs. FPS Scatter
         if 'overall_trainable_ratio_%' in df_bench.columns:
             plt.figure(figsize=(9, 6))
-            sns.scatterplot(data=df_bench, x='overall_trainable_ratio_%', y='fps', hue='architecture', style='tensorrt', s=150, alpha=0.8)
+            # FIXED: Changed style='tensorrt' to style='onnx'
+            sns.scatterplot(data=df_bench, x='overall_trainable_ratio_%', y='fps', hue='architecture', style='onnx', s=150, alpha=0.8)
             plt.title("Trainable Footprint vs. Inference Speed", fontweight='bold')
             plt.xlabel("Trainable Parameters (%)")
             plt.ylabel("Inference Speed (FPS)")
-            plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left', title="Arch / TensorRT")
+            # FIXED: Changed title from 'TensorRT' to 'ONNX'
+            plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left', title="Arch / ONNX")
             plt.tight_layout()
             plt.savefig(output_dir / "tradeoff_params_vs_fps.png", dpi=300, bbox_inches='tight')
             plt.close()
 
         print(f"  -> Generated Global Ablation & Trade-off plots at {output_dir}")
+    
+        # Peak Memory Footprint PyTorch vs ONNX
+        if 'peak_reserved_mb' in df_bench.columns:
+            plt.figure(figsize=(10, 6))
+            # Grouping by architecture and ONNX status
+            sns.barplot(data=df_bench, x='architecture', y='peak_reserved_mb', hue='onnx', palette='muted', errorbar=None)
+            plt.title("Edge Memory Constraints: Native PyTorch vs ONNX Runtime", fontweight='bold')
+            plt.xlabel("Lightweight Architecture")
+            plt.ylabel("Peak Reserved Memory (MB)")
+            plt.legend(title="ONNX Accelerated", bbox_to_anchor=(1.05, 1), loc='upper left')
+            plt.tight_layout()
+            plt.savefig(output_dir / "hardware_memory_comparison.png", dpi=300, bbox_inches='tight')
+            plt.close()
+
+        # Direct FPS Acceleration Comparison
+        if 'fps' in df_bench.columns:
+            plt.figure(figsize=(10, 6))
+            # Filter for FULL rank to show baseline architectural speedups
+            df_full = df_bench[df_bench['lora_r'].astype(str) == 'FULL']
+            sns.barplot(data=df_full, x='architecture', y='fps', hue='onnx', palette='pastel', errorbar=None)
+            plt.title("Inference Throughput Acceleration (FULL Rank)", fontweight='bold')
+            plt.xlabel("Architecture")
+            plt.ylabel("Frames Per Second (FPS)")
+            plt.legend(title="ONNX Accelerated", bbox_to_anchor=(1.05, 1), loc='upper left')
+            plt.tight_layout()
+            plt.savefig(output_dir / "hardware_fps_acceleration_bar.png", dpi=300, bbox_inches='tight')
+            plt.close()
+
 
 # ==========================================
 # MAIN BATCH PROCESSOR

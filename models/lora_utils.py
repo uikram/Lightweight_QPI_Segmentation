@@ -147,7 +147,13 @@ class LoRAConv2d(nn.Module):
             self.lora_dropout = nn.Identity()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Pass the captured groups and bias to the base convolution
+        # 1. Skip LoRA branches if weights are already merged
+        if self.merged:
+            return nn.functional.conv2d(
+                x, self.weight, bias=self.bias, stride=self.stride, 
+                padding=self.padding, groups=self.groups
+            )
+
         base_out = nn.functional.conv2d(
             x, self.weight, bias=self.bias, stride=self.stride, 
             padding=self.padding, groups=self.groups
@@ -276,9 +282,13 @@ def merge_lora_weights(model: nn.Module) -> nn.Module:
             if hasattr(module, "merge"):
                 try:
                     module.merge()
+                    # 2. Bulletproof ONNX export: delete submodules entirely
+                    if hasattr(module, 'lora_A'): del module.lora_A
+                    if hasattr(module, 'lora_B'): del module.lora_B
+                    if hasattr(module, 'lora_dropout'): del module.lora_dropout
                 except NotImplementedError:
-                    pass  # Gracefully skip Conv2d merging
-    print("[LoRA] All eligible LoRA weights merged into base weights.")
+                    pass 
+    print("[LoRA] All eligible LoRA weights merged into base weights and graph stripped for ONNX.")
     return model
 
 
