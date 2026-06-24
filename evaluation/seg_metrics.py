@@ -29,58 +29,59 @@ class SegmentationMetrics:
         results = metrics.compute()
     """
 
-    def __init__(self, num_classes: int = 1, boundary_tolerance: int = 2):
+    def __init__(self, num_classes: int = 5, boundary_tolerance: int = 2):
         self.num_classes         = num_classes
         self.boundary_tolerance  = boundary_tolerance
         self.reset()
 
     def reset(self):
-        self._tp = 0.0
-        self._fp = 0.0
-        self._fn = 0.0
-        self._tn = 0.0
+        # Arrays to track per-class metrics
+        self._tp = np.zeros(self.num_classes)
+        self._fp = np.zeros(self.num_classes)
+        self._fn = np.zeros(self.num_classes)
 
+        # Binary/Physics tracking
         self._aji_intersection = 0.0
         self._aji_union        = 0.0
-
         self._boundary_tp = 0.0
         self._boundary_fp = 0.0
         self._boundary_fn = 0.0
-
+        self._phase_vol_errors_per_class = {c: [] for c in range(1, self.num_classes)} #Added after LORA_FIX_2
         self._phase_vol_errors: List[float] = []
         self._latencies: List[float]        = []
         self._n_samples = 0
 
-    def update(self, pred: torch.Tensor, target: torch.Tensor,
-               phase_raw: Optional[torch.Tensor] = None):
-        """
-        pred:      (B, H, W) binary long tensor (0/1)
-        target:    (B, H, W) binary long tensor (0/1)
-        phase_raw: (B, H, W) raw phase values (optional, for PhaseVolError)
-        """
+    def update(self, pred: torch.Tensor, target: torch.Tensor, phase_raw: Optional[torch.Tensor] = None):
         pred_np   = pred.cpu().numpy().astype(np.uint8)
         target_np = target.cpu().numpy().astype(np.uint8)
-
         B = pred_np.shape[0]
         self._n_samples += B
+        
+        from scipy.ndimage import label as cc_label
 
         for i in range(B):
             p = pred_np[i]
             t = target_np[i]
+            
+            # 1. PER-CLASS BIOLOGICAL METRICS (Dice, IoU)
+            for c in range(1, self.num_classes): # Skip background (0)
+                self._tp[c] += np.logical_and(p == c, t == c).sum()
+                self._fp[c] += np.logical_and(p == c, t != c).sum()
+                self._fn[c] += np.logical_and(p != c, t == c).sum()
 
-            # Pixel-level TP/FP/FN/TN
-            self._tp += np.logical_and(p == 1, t == 1).sum()
-            self._fp += np.logical_and(p == 1, t == 0).sum()
-            self._fn += np.logical_and(p == 0, t == 1).sum()
-            self._tn += np.logical_and(p == 0, t == 0).sum()
+            # 2. BINARY PHYSICS METRICS (Collapse to foreground for AJI, BF1, Phase Vol)
+            p_binary = (p > 0).astype(np.uint8)
+            t_binary = (t > 0).astype(np.uint8)
 
-            # AJI components
-            inter, union = _aji_components(p, t)
+            # Connected Components for AJI (Your Fix 1)
+            p_labeled, _ = cc_label(p_binary)
+            t_labeled, _ = cc_label(t_binary)
+            inter, union = _aji_components(p_labeled, t_labeled)
             self._aji_intersection += inter
             self._aji_union        += union
 
             # Boundary F1
-            btp, bfp, bfn = _boundary_stats(p, t, self.boundary_tolerance)
+            btp, bfp, bfn = _boundary_stats(p_binary, t_binary, self.boundary_tolerance)
             self._boundary_tp += btp
             self._boundary_fp += bfp
             self._boundary_fn += bfn
@@ -88,34 +89,49 @@ class SegmentationMetrics:
             # Phase volume error
             if phase_raw is not None:
                 ph = phase_raw[i].cpu().numpy() if torch.is_tensor(phase_raw) else phase_raw[i]
-                pv_error = _phase_volume_error(p, t, ph)
-                self._phase_vol_errors.append(pv_error)
+                
+                # Keep binary (global) calculation
+                pv_error_global = _phase_volume_error(p_binary, t_binary, ph)
+                self._phase_vol_errors.append(pv_error_global)
 
-    def record_latency(self, latency_ms: float):
-        self._latencies.append(latency_ms)
+                # Add per-class calculation
+                for c in range(1, self.num_classes):
+                    t_c = (t == c).astype(np.uint8)
+                    if t_c.any():
+                        p_c = (p == c).astype(np.uint8)
+                        self._phase_vol_errors_per_class[c].append(_phase_volume_error(p_c, t_c, ph))
 
     def compute(self) -> Dict[str, float]:
         eps = 1e-8
-
-        dice = (2 * self._tp + eps) / (2 * self._tp + self._fp + self._fn + eps)
-        iou  = (self._tp + eps) / (self._tp + self._fp + self._fn + eps)
-        prec = (self._tp + eps) / (self._tp + self._fp + eps)
-        rec  = (self._tp + eps) / (self._tp + self._fn + eps)
+        
+        # Macro-averaged per-class metrics
+        dice_per_class = (2 * self._tp + eps) / (2 * self._tp + self._fp + self._fn + eps)
+        iou_per_class  = (self._tp + eps) / (self._tp + self._fp + self._fn + eps)
+        
+        # Mean scores ignoring background (index 0)
+        mean_dice = float(np.mean(dice_per_class[1:]))
+        mean_iou  = float(np.mean(iou_per_class[1:]))
 
         aji = (self._aji_intersection + eps) / (self._aji_union + eps)
-
         b_prec = (self._boundary_tp + eps) / (self._boundary_tp + self._boundary_fp + eps)
         b_rec  = (self._boundary_tp + eps) / (self._boundary_tp + self._boundary_fn + eps)
         bf1    = 2 * b_prec * b_rec / (b_prec + b_rec + eps)
 
         results = {
-            "dice":      float(dice),
-            "iou":       float(iou),
-            "precision": float(prec),
-            "recall":    float(rec),
+            "mean_dice": mean_dice,
+            "mean_iou":  mean_iou,
             "aji":       float(aji),
             "bf1":       float(bf1),
         }
+        
+        # Add per-class volume error inside the classes loop
+        classes = ["discocyte", "echinocyte", "spherocyte", "stomatocyte"]
+        for c_idx, c_name in enumerate(classes, start=1):
+            results[f"dice_{c_name}"] = float(dice_per_class[c_idx])
+            
+            class_vols = self._phase_vol_errors_per_class[c_idx]
+            if class_vols:
+                results[f"phase_vol_error_{c_name}"] = float(np.mean(class_vols))
 
         if self._phase_vol_errors:
             results["phase_vol_error"] = float(np.mean(self._phase_vol_errors))
@@ -132,8 +148,8 @@ class SegmentationMetrics:
         if results is None:
             results = self.compute()
         print(f"\n{prefix}Segmentation Metrics:")
-        print(f"  Dice:            {results.get('dice', 0):.4f}")
-        print(f"  IoU:             {results.get('iou', 0):.4f}")
+        print(f"  Dice:            {results.get('mean_dice', 0):.4f}")
+        print(f"  IoU:             {results.get('mean_iou', 0):.4f}")
         print(f"  AJI:             {results.get('aji', 0):.4f}")
         print(f"  Boundary F1:     {results.get('bf1', 0):.4f}")
         if "phase_vol_error" in results:
@@ -152,8 +168,8 @@ class SegmentationMetrics:
 def _aji_components(pred: np.ndarray, target: np.ndarray):
     """
     Aggregated Jaccard Index components for a single image pair.
-    For binary masks (single object class), equivalent to standard IoU.
-    For multi-instance, each predicted instance is matched to best GT instance.
+    VECTORIZED FIX: Uses bincount to compute all intersections simultaneously,
+    preventing catastrophic CPU hangs when models predict checkerboard noise.
     """
     pred_ids   = np.unique(pred[pred > 0])
     target_ids = np.unique(target[target > 0])
@@ -162,45 +178,61 @@ def _aji_components(pred: np.ndarray, target: np.ndarray):
         return 1.0, 1.0  # Both empty = perfect
 
     if len(target_ids) == 0:
-        return 0.0, pred.sum().item()
+        return 0.0, float((pred > 0).sum())
 
     if len(pred_ids) == 0:
-        return 0.0, target.sum().item()
+        return 0.0, float((target > 0).sum())
+
+    max_p = int(pred.max()) + 1
+    max_t = int(target.max()) + 1
+    
+    # 1. Compute areas of every individual prediction and target instance
+    p_areas = np.bincount(pred.ravel(), minlength=max_p)
+    t_areas = np.bincount(target.ravel(), minlength=max_t)
+
+    # 2. Compute intersection matrix using bincount on combined hashes
+    # We only care where both prediction and target are foreground (>0)
+    mask = (pred > 0) & (target > 0)
+    combo = target[mask] * max_p + pred[mask]
+    intersections = np.bincount(combo)
 
     total_inter = 0.0
     total_union = 0.0
     used_pred   = set()
 
+    # 3. Fast lookup loop (No array operations inside!)
     for t_id in target_ids:
-        t_mask = target == t_id
-        best_iou  = 0.0
-        best_p_id = -1
+        best_iou   = 0.0
+        best_p_id  = -1
+        best_inter = 0.0
+        best_union = 0.0
 
         for p_id in pred_ids:
-            p_mask = pred == p_id
-            inter  = np.logical_and(t_mask, p_mask).sum()
-            union  = np.logical_or(t_mask, p_mask).sum()
-            iou    = inter / (union + 1e-8)
-            if iou > best_iou:
-                best_iou  = iou
-                best_p_id = p_id
+            idx = t_id * max_p + p_id
+            inter = intersections[idx] if idx < len(intersections) else 0
+            
+            if inter > 0:
+                union = t_areas[t_id] + p_areas[p_id] - inter
+                iou = inter / union
+                if iou > best_iou:
+                    best_iou   = iou
+                    best_p_id  = p_id
+                    best_inter = float(inter)
+                    best_union = float(union)
 
         if best_p_id >= 0:
-            p_mask = pred == best_p_id
-            inter  = np.logical_and(t_mask, p_mask).sum()
-            union  = np.logical_or(t_mask, p_mask).sum()
-            total_inter += inter
-            total_union += union
+            total_inter += best_inter
+            total_union += best_union
             used_pred.add(best_p_id)
         else:
-            total_union += t_mask.sum()
+            total_union += float(t_areas[t_id])
 
     # Unmatched predictions add to union
     for p_id in pred_ids:
         if p_id not in used_pred:
-            total_union += (pred == p_id).sum()
+            total_union += float(p_areas[p_id])
 
-    return float(total_inter), float(total_union)
+    return total_inter, total_union
 
 
 def _boundary_stats(pred: np.ndarray, target: np.ndarray,

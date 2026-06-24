@@ -1,30 +1,21 @@
 """
 QPI Dataset: Loader for single-channel quantitative phase images.
 
-Expected directory structure:
+Actual directory structure (X_train / Y_train layout):
     data_root/
-        train/
-            phase/          ← .npy or .tiff float32 phase maps (radians)
-            masks/          ← .npy uint8 instance masks
-            labels.csv      ← optional morphology class labels
-        val/
-            phase/
-            masks/
-            labels.csv
-        test/
-            phase/
-            masks/
-            labels.csv
+        X_train/    ← .tif float32 phase maps (single-channel, radians)
+        Y_train/    ← .tif uint8/int semantic masks, pixel values 0-4
+        X_val/      ← used as validation during training (also serves as test set)
+        Y_val/
+
+Mask pixel values:
+    0: Background
+    1: Discocyte
+    2: Echinocyte
+    3: Spherocyte
+    4: Stomatocyte
 
 Phase maps: float32, shape (H, W), values in radians.
-Masks: uint8, shape (H, W), 0=background, 1=cell instance (binary)
-       OR instance-level integer labels for instance segmentation.
-
-Morphology classes (for RBC):
-    0: discocyte
-    1: echinocyte
-    2: stomatocyte
-    3: spherocyte
 """
 
 import os
@@ -32,25 +23,30 @@ import csv
 import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import WeightedRandomSampler
 from pathlib import Path
 from typing import Optional, Dict, List, Tuple
 from datasets.qpi_augmentation import QPIAugmentation, QPIValTransform
+from datetime import datetime
 
-# Optional TIFF support
 try:
     import tifffile
     TIFF_AVAILABLE = True
 except ImportError:
     TIFF_AVAILABLE = False
 
+# ── Label mapping ─────────────────────────────────────────────────────────────
+# Indices match dataset pixel values exactly (no offset).
 MORPHOLOGY_CLASSES = {
-    "discocyte":  0,
-    "echinocyte": 1,
-    "stomatocyte": 2,
-    "spherocyte": 3,
+    "background":  0,
+    "discocyte":   1,
+    "echinocyte":  2,
+    "spherocyte":  3,
+    "stomatocyte": 4,
 }
 
-CLASS_WEIGHTS = [1.0, 1.5, 1.5, 2.0]  # Higher weight for rarer classes
+
+NUM_CLASSES = 5
 
 
 class QPIDataset(Dataset):
@@ -58,9 +54,9 @@ class QPIDataset(Dataset):
     Dataset for quantitative phase image segmentation.
 
     Returns:
-        phase:  (1, H, W) float32 tensor  – normalized phase map
-        mask:   (H, W) long tensor         – binary or instance mask
-        meta:   dict with filename, morphology_class, storage_day
+        phase:   (1, H, W) float32 tensor  – normalized phase map
+        mask:    (H, W)    long tensor      – class labels 0-4
+        meta:    dict with stem, morphology_class, storage_day
     """
 
     def __init__(self,
@@ -71,159 +67,186 @@ class QPIDataset(Dataset):
                  return_phase_raw: bool = True):
         """
         Args:
-            data_root:        Root directory containing train/val/test splits.
-            split:            One of "train", "val", "test".
-            image_size:       Resize phase maps to (image_size, image_size) if set.
+            data_root:        Root directory containing X_train, Y_train, X_val, Y_val.
+            split:            'train' or 'val'.
+            image_size:       Resize to (image_size, image_size) if set.
             augment:          Apply physics-preserving augmentation (train only).
             return_phase_raw: If True, also return unnormalized phase for loss computation.
         """
-        self.data_root       = Path(data_root)
-        self.split           = split
-        self.image_size      = image_size
+        self.data_root        = Path(data_root)
+        self.split            = split
+        self.image_size       = image_size
         self.return_phase_raw = return_phase_raw
 
-        split_dir = self.data_root / split
-        self.phase_dir = split_dir / "phase"
-        self.mask_dir  = split_dir / "masks"
+        # ── Directory layout: X_{split} / Y_{split} ──────────────────────────
+        self.phase_dir = self.data_root / f"X_{split}"
+        self.mask_dir  = self.data_root / f"Y_{split}"
 
         if not self.phase_dir.exists():
-            raise FileNotFoundError(f"Phase directory not found: {self.phase_dir}")
+            raise FileNotFoundError(
+                f"Phase directory not found: {self.phase_dir}\n"
+                f"Expected layout: {{data_root}}/X_{{split}} and Y_{{split}}"
+            )
         if not self.mask_dir.exists():
-            raise FileNotFoundError(f"Mask directory not found: {self.mask_dir}")
+            raise FileNotFoundError(
+                f"Mask directory not found: {self.mask_dir}"
+            )
 
-        # Collect sample paths
         self.samples = self._collect_samples()
 
-        # Load morphology labels if available
-        label_file = split_dir / "labels.csv"
+        # labels.csv is optional — falls back to empty dict gracefully
+        label_file    = self.data_root / f"labels_{split}.csv"
         self.labels = self._load_labels(label_file) if label_file.exists() else {}
 
-        # Transforms
+        # ── Transforms ────────────────────────────────────────────────────────
         if augment and split == "train":
             self.transform = QPIAugmentation(
                 flip_h=True, flip_v=True, rotate=True,
-                translate=True, zoom=False, normalize=True
+                translate=True, normalize=True
             )
         else:
             self.transform = QPIValTransform()
 
-        print(f"[QPIDataset] {split}: {len(self.samples)} samples loaded "
-              f"from {split_dir}")
+        print(f"[QPIDataset] {split}: {len(self.samples)} samples "
+              f"from {self.phase_dir.name} / {self.mask_dir.name}")
 
+    # ── Sample collection ─────────────────────────────────────────────────────
     def _collect_samples(self) -> List[Dict]:
-        """Collect matched phase/mask file pairs."""
         phase_files = sorted(
-            list(self.phase_dir.glob("*.npy")) +
+            list(self.phase_dir.glob("*.tif")) +
             list(self.phase_dir.glob("*.tiff")) +
-            list(self.phase_dir.glob("*.tif"))
+            list(self.phase_dir.glob("*.TIF")) +
+            list(self.phase_dir.glob("*.TIFF")) +
+            list(self.phase_dir.glob("*.npy"))
         )
 
-        samples = []
-        missing_masks = 0
+        samples   = []
+        raw_dates = []
+        missing   = 0
 
-        for pf in phase_files:
+        for pf in phase_files:          # ← single flat loop, no nesting
             stem = pf.stem
-            # Look for matching mask
             mask_path = None
-            for ext in [".npy", ".tiff", ".tif", ".png"]:
-                candidate = self.mask_dir / (stem + ext)
-                if candidate.exists():
-                    mask_path = candidate
+            possible_stems = [stem, f"mask_{stem}", f"{stem}_mask",
+                            stem.replace("image", "mask")]
+            for p_stem in possible_stems:
+                for ext in [".tif", ".tiff", ".npy", ".png", ".TIF", ".TIFF", ".PNG"]:
+                    candidate = self.mask_dir / (p_stem + ext)
+                    if candidate.exists():
+                        mask_path = candidate
+                        break
+                if mask_path:
                     break
 
             if mask_path is None:
-                missing_masks += 1
+                missing += 1
                 continue
 
-            # Extract storage day from filename if present (e.g., day_14_cell_001)
-            storage_day = None
-            parts = stem.split("_")
-            for i, p in enumerate(parts):
-                if p == "day" and i + 1 < len(parts):
-                    try:
-                        storage_day = int(parts[i + 1])
-                    except ValueError:
-                        pass
+            try:
+                raw_dates.append(datetime.strptime(stem.split("_")[0], "%Y%m%d"))
+            except ValueError:
+                raw_dates.append(None)
 
-            samples.append({
-                "phase_path":   pf,
-                "mask_path":    mask_path,
-                "stem":         stem,
-                "storage_day":  storage_day,
-            })
+            samples.append({"phase_path": pf, "mask_path": mask_path,
+                            "stem": stem, "storage_day": None})
 
-        if missing_masks > 0:
-            print(f"[QPIDataset] Warning: {missing_masks} phase files had no matching mask.")
+        # Compute relative days ONCE after the loop
+        valid_dates = [d for d in raw_dates if d is not None]
+        base_date   = min(valid_dates) if valid_dates else None
+        for s, d in zip(samples, raw_dates):
+            if d is not None and base_date is not None:
+                s["storage_day"] = (d - base_date).days
 
-        if len(samples) == 0:
-            raise RuntimeError(
-                f"No matched phase/mask pairs found in {self.phase_dir}. "
-                f"Check file naming convention."
-            )
-
+        if missing:
+            print(f"[QPIDataset] Warning: {missing} phase files had no matching mask.")
+        if not samples:
+            raise RuntimeError(f"No matched phase/mask pairs found.\n"
+                            f"  phase_dir: {self.phase_dir}\n"
+                            f"  mask_dir:  {self.mask_dir}")
         return samples
 
+    # ── Label CSV ─────────────────────────────────────────────────────────────
     def _load_labels(self, label_file: Path) -> Dict[str, int]:
-        """Load morphology class labels from CSV."""
         labels = {}
         with open(label_file, "r") as f:
             reader = csv.DictReader(f)
             for row in reader:
-                stem  = Path(row["filename"]).stem
-                cls   = row.get("morphology_class", "discocyte").strip().lower()
+                stem = Path(row["filename"]).stem
+                cls  = row.get("morphology_class", "background").strip().lower()
                 labels[stem] = MORPHOLOGY_CLASSES.get(cls, 0)
         print(f"[QPIDataset] Loaded {len(labels)} morphology labels.")
         return labels
 
+    # ── Loaders ───────────────────────────────────────────────────────────────
     def _load_phase(self, path: Path) -> np.ndarray:
-        """Load phase map as float32 array."""
-        if path.suffix == ".npy":
-            phase = np.load(path).astype(np.float32)
-        elif path.suffix in [".tiff", ".tif"]:
+        if path.suffix.lower() in [".tif", ".tiff"]:
             if not TIFF_AVAILABLE:
-                raise ImportError("tifffile required for .tiff files: pip install tifffile")
+                raise ImportError("Install tifffile: pip install tifffile")
             phase = tifffile.imread(str(path)).astype(np.float32)
+        elif path.suffix == ".npy":
+            phase = np.load(path).astype(np.float32)
         else:
-            raise ValueError(f"Unsupported phase file format: {path.suffix}")
+            raise ValueError(f"Unsupported phase format: {path.suffix}")
 
-        # Ensure 2D
+        # Ensure 2-D (H, W)
         if phase.ndim == 3:
-            phase = phase[0]  # Take first channel if multi-channel
-
+            phase = phase[0]
         return phase
 
     def _load_mask(self, path: Path) -> np.ndarray:
-        """Load segmentation mask as uint8 array."""
-        if path.suffix == ".npy":
-            mask = np.load(path)
-        elif path.suffix in [".tiff", ".tif"]:
+        """
+        Load semantic mask and return as (H, W) int64 array with values 0-4.
+
+        Handles two TIFF encodings:
+          • Single-channel (H, W): values 0-4 — ground-truth format, used as-is.
+          • Multi-channel (H, W, C): treated as single-channel by taking channel 0.
+            This covers the case where GT files were accidentally saved as RGB
+            but all channels carry the same class-index plane.
+            A warning is printed if channels differ so you can diagnose the files.
+        """
+        if path.suffix.lower() in [".tif", ".tiff"]:
             if not TIFF_AVAILABLE:
-                raise ImportError("tifffile required: pip install tifffile")
+                raise ImportError("Install tifffile: pip install tifffile")
             mask = tifffile.imread(str(path))
-        elif path.suffix == ".png":
+        elif path.suffix == ".npy":
+            mask = np.load(path)
+        elif path.suffix.lower() == ".png":
             try:
                 from PIL import Image
                 mask = np.array(Image.open(path))
             except ImportError:
-                raise ImportError("Pillow required for .png masks: pip install Pillow")
+                raise ImportError("Install Pillow: pip install Pillow")
         else:
             raise ValueError(f"Unsupported mask format: {path.suffix}")
 
-        # Binarize: any non-zero value = cell
-        return (mask > 0).astype(np.int64)
+        # ── Handle multi-channel TIFFs ────────────────────────────────────────
+        if mask.ndim == 3:
+            if not np.array_equal(mask[:, :, 0], mask[:, :, 1]):
+                print(
+                    f"[QPIDataset] WARNING: mask {path.name} has 3 channels "
+                    f"with differing values. Taking channel 0. "
+                    f"Verify your Y_train TIFF format is single-channel int (0-4)."
+                )
+            mask = mask[:, :, 0]
 
+        return mask.astype(np.int64)
+
+    # ── Resize ────────────────────────────────────────────────────────────────
     def _resize(self, phase: np.ndarray, mask: np.ndarray):
-        """Resize phase and mask to target image_size."""
-        import torch.nn.functional as F
-        ph = torch.from_numpy(phase).unsqueeze(0).unsqueeze(0)  # (1,1,H,W)
+        ph = torch.from_numpy(phase).unsqueeze(0).unsqueeze(0)       # (1,1,H,W)
         mk = torch.from_numpy(mask).unsqueeze(0).unsqueeze(0).float()
 
-        ph = F.interpolate(ph, size=(self.image_size, self.image_size),
-                           mode="bilinear", align_corners=False).squeeze()
-        mk = F.interpolate(mk, size=(self.image_size, self.image_size),
-                           mode="nearest").squeeze().long()
+        ph = torch.nn.functional.interpolate(
+            ph, size=(self.image_size, self.image_size),
+            mode="bilinear", align_corners=False
+        ).squeeze()
+        mk = torch.nn.functional.interpolate(
+            mk, size=(self.image_size, self.image_size),
+            mode="nearest"
+        ).squeeze().long()
         return ph.numpy(), mk.numpy()
 
+    # ── Dataset interface ─────────────────────────────────────────────────────
     def __len__(self) -> int:
         return len(self.samples)
 
@@ -240,91 +263,97 @@ class QPIDataset(Dataset):
         if self.image_size is not None:
             phase, mask = self._resize(phase, mask)
 
-        # Store raw phase BEFORE augmentation for physics-aware loss
-        phase_raw = torch.from_numpy(phase.copy()).unsqueeze(0)  # (1, H, W)
+        phase_t = torch.from_numpy(phase).unsqueeze(0)            # (1, H, W)
+        mask_t  = torch.from_numpy(mask).long()                   # (H, W)
 
-        # Convert to tensors
-        phase_t = torch.from_numpy(phase).unsqueeze(0)  # (1, H, W)
-        mask_t  = torch.from_numpy(mask).long()          # (H, W)
-
-        # Apply transforms (returns normalized phase + mask)
-        phase_t, mask_t = self.transform(phase_t, mask_t)
+        # FIX: Receive phase_raw directly from the transform pipeline
+        phase_t, mask_t, phase_raw = self.transform(phase_t, mask_t)
 
         morphology_class = self.labels.get(sample["stem"], 0)
         storage_day      = sample["storage_day"] if sample["storage_day"] is not None else -1
 
         result = {
-            "phase":            phase_t,         # (1, H, W) normalized
-            "mask":             mask_t,           # (H, W) long
-            "morphology_class": morphology_class, # int
-            "storage_day":      storage_day,      # int (-1 if unknown)
+            "phase":            phase_t,
+            "mask":             mask_t,
+            "morphology_class": morphology_class,
+            "storage_day":      storage_day,
             "stem":             sample["stem"],
         }
-
         if self.return_phase_raw:
-            result["phase_raw"] = phase_raw      # (1, H, W) unnormalized
+            result["phase_raw"] = phase_raw
 
         return result
 
 
-# ---------------------------------------------------------------------------
-# Dataloader factory
-# ---------------------------------------------------------------------------
+# ── DataLoader factory ────────────────────────────────────────────────────────
 
 def get_qpi_loaders(config, num_workers: int = 4):
     """
-    Build train/val/test DataLoaders for QPI segmentation.
+    Build train / val DataLoaders from X_train/Y_train and X_val/Y_val.
+    The val loader doubles as the test loader (no separate test split).
 
-    Returns:
-        train_loader, val_loader, test_loader (test_loader may be None)
+    Returns: train_loader, val_loader, None
     """
-    data_root  = str(getattr(config, "data_root", config.train_image_dir))
-    image_size = getattr(config, "image_size", None)
-    batch_size = getattr(config, "batch_size", 8)
-    debug_mode = getattr(config, "debug_mode", False)
+    data_root  = str(getattr(config, "data_root", "./dataset"))
+    image_size = getattr(config, "image_size",  None)
+    batch_size = getattr(config, "batch_size",  8)
+    debug_mode = getattr(config, "debug_mode",  False)
 
-    train_ds = QPIDataset(data_root, split="train", image_size=image_size,
-                          augment=True)
-    val_ds   = QPIDataset(data_root, split="val",   image_size=image_size,
-                          augment=False)
+    train_ds = QPIDataset(data_root, split="train", image_size=image_size, augment=False)
+    val_ds   = QPIDataset(data_root, split="val",   image_size=image_size, augment=False)
 
     if debug_mode:
         from torch.utils.data import Subset
-        train_ds = Subset(train_ds, range(min(50, len(train_ds))))
-        val_ds   = Subset(val_ds,   range(min(20, len(val_ds))))
+        train_ds = Subset(train_ds, range(min(32, len(train_ds))))
+        val_ds   = Subset(val_ds,   range(min(16, len(val_ds))))
+
+    nw = num_workers if not debug_mode else 0
+
+    # Access the underlying dataset if it's wrapped in a Subset (debug_mode)
+    ds_for_weights = train_ds.dataset if hasattr(train_ds, 'dataset') else train_ds
+
+    # Only use the sampler if we actually have labels to balance
+    if not debug_mode and len(ds_for_weights) > 0 and len(ds_for_weights.labels) > 0:
+        class_counts = torch.zeros(5) # 5 classes
+        for s in ds_for_weights.samples:
+            if s["stem"] in ds_for_weights.labels:
+                cls = ds_for_weights.labels[s["stem"]]
+                class_counts[cls] += 1
+            else:
+                # Assign missing labels explicitly to class 1 (Discocyte) as a safe 
+                # majority-class default, preventing background (0) frequency distortion.
+                class_counts[1] += 1
+            
+        class_counts = class_counts.clamp(min=1)
+        class_weights = 1.0 / class_counts
+        
+        sample_weights = torch.tensor(
+            [class_weights[ds_for_weights.labels.get(s["stem"], 1)] for s in ds_for_weights.samples]
+        )
+        # len(train_ds) ensures we sample the correct amount if debug_mode modified the length
+        sampler = WeightedRandomSampler(sample_weights, len(train_ds), replacement=True)
+        shuffle = False
+    else:
+        sampler = None
+        shuffle = True
 
     train_loader = DataLoader(
-        train_ds,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=num_workers if not debug_mode else 0,
-        pin_memory=True,
-        drop_last=True,
+        train_ds, batch_size=batch_size, shuffle=shuffle, sampler=sampler,
+        num_workers=nw, pin_memory=True, drop_last=True,
     )
     val_loader = DataLoader(
-        val_ds,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=num_workers if not debug_mode else 0,
-        pin_memory=True,
+        val_ds, batch_size=batch_size, shuffle=False,
+        num_workers=nw, pin_memory=True,
     )
 
-    # Optional test set
-    test_loader = None
-    test_dir = Path(data_root) / "test"
-    if test_dir.exists():
-        test_ds = QPIDataset(data_root, split="test", image_size=image_size,
-                             augment=False)
-        test_loader = DataLoader(
-            test_ds,
-            batch_size=batch_size,
-            shuffle=False,
-            num_workers=num_workers if not debug_mode else 0,
-            pin_memory=True,
-        )
-
     print(f"[QPIDataLoader] Train: {len(train_loader)} batches | "
-          f"Val: {len(val_loader)} batches | "
-          f"Test: {len(test_loader) if test_loader else 0} batches")
+          f"Val: {len(val_loader)} batches")
+
+    try:
+        test_ds = QPIDataset(data_root, split="test", image_size=image_size, augment=False)
+        test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False, num_workers=nw)
+    except FileNotFoundError:
+        print("[QPIDataLoader] No X_test/Y_test found. Defaulting test_loader to val_loader.")
+        test_loader = val_loader
 
     return train_loader, val_loader, test_loader

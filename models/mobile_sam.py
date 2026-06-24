@@ -46,57 +46,47 @@ class LightweightMaskDecoder(nn.Module):
             dropout=0.0, batch_first=True
         )
 
-        self.upscale = nn.Sequential(
-            nn.ConvTranspose2d(in_channels, in_channels // 4, kernel_size=2, stride=2),
-            nn.LayerNorm([in_channels // 4, 1, 1]),  # placeholder, corrected in forward
-            nn.GELU(),
-            nn.ConvTranspose2d(in_channels // 4, in_channels // 8, kernel_size=2, stride=2),
-            nn.GELU(),
-        )
-
-        self.output_conv = nn.Conv2d(in_channels // 8, num_classes, kernel_size=1)
-
     def forward(self, image_embeddings: torch.Tensor,
                 prompt_embeddings: torch.Tensor) -> torch.Tensor:
         B, C, H, W = image_embeddings.shape
-
+        
         # Flatten spatial dims for transformer
         img_seq = image_embeddings.flatten(2).permute(0, 2, 1)  # (B, HW, C)
-
         mask_tok = self.mask_tokens.weight.unsqueeze(0).expand(B, -1, -1)
-        out = self.transformer(mask_tok, img_seq)                # (B, num_cls, C)
-
-        # Reshape back and decode
-        upscaled = self.upscale_from_embeddings(image_embeddings)
-        logits   = (out @ upscaled.flatten(2)).view(B, -1, H * 4, W * 4)
+        
+        # Integrate the QPI learned prompt into the mask tokens
+        mask_tok = mask_tok + prompt_embeddings 
+        
+        out = self.transformer(mask_tok, img_seq)  # (B, num_classes, C)
+        
+        upscaled = F.interpolate(image_embeddings, scale_factor=4,
+                                 mode="bilinear", align_corners=False)  # (B, C, 4H, 4W)
+        
+        # Project each spatial position using class token weights
+        logits = torch.einsum('bnc,bchw->bnhw', out, upscaled)  # (B, num_classes, 4H, 4W)
         return logits
-
-    def upscale_from_embeddings(self, x):
-        x = F.interpolate(x, scale_factor=4, mode="bilinear", align_corners=False)
-        return x
 
 
 class MobileSAMSeg(nn.Module):
     """
     MobileSAM-based segmentation model for single-channel QPI.
-
-    Attempts to load the official MobileSAM TinyViT encoder.
-    Falls back to a lightweight CNN encoder if mobile_sam package
-    is not installed.
-
-    Input:  (B, 1, H, W)  – single-channel phase map
-    Output: (B, num_classes, H, W) – segmentation logits
     """
 
     EMBED_DIM = 256
 
     def __init__(self, num_classes: int = 1, pretrained: bool = True,
-                 image_size: int = 512):
+                 image_size: int = 512): # You can keep this arg to not break get_model
         super().__init__()
         self.num_classes = num_classes
-        self.image_size  = image_size
+        
+        # FIX: TinyViT strictly requires 1024x1024
+        self.encoder_input_size = 1024  
 
         self.encoder = self._build_encoder(pretrained)
+        
+        # FIX: Explicitly track if we are using the official TinyViT or the CNN fallback
+        self.is_tiny_vit = not isinstance(self.encoder, nn.Sequential)
+
         self.prompt_encoder  = QPIPromptEncoder(embed_dim=self.EMBED_DIM)
         self.mask_decoder    = LightweightMaskDecoder(
             in_channels=self.EMBED_DIM, num_classes=num_classes
@@ -106,11 +96,35 @@ class MobileSAMSeg(nn.Module):
     def _build_encoder(self, pretrained: bool) -> nn.Module:
         try:
             from mobile_sam import sam_model_registry
-            sam = sam_model_registry["vit_t"](checkpoint=None)
+            import os
+            
+            ckpt_path = "weights/mobile_sam.pt"
+            
+            if pretrained:
+                if not os.path.exists(ckpt_path):
+                    raise FileNotFoundError(
+                        f"MobileSAM checkpoint not found at {ckpt_path}. "
+                        f"LoRA adaptation requires pretrained weights."
+                    )
+                sam = sam_model_registry["vit_t"](checkpoint=ckpt_path) # Assuming vit_t registry
+                ckpt_status = ckpt_path
+            else:
+                sam = sam_model_registry["vit_t"](checkpoint=None)
+                ckpt_status = "None (Random Weights)"
+
             encoder = sam.image_encoder
 
+            # Locate the patch embedding convolution
+            if hasattr(encoder.patch_embed, 'proj'):
+                orig_proj = encoder.patch_embed.proj
+                is_tiny_vit = False
+            elif hasattr(encoder.patch_embed, 'seq'):
+                orig_proj = encoder.patch_embed.seq[0].c
+                is_tiny_vit = True
+            else:
+                raise AttributeError("Could not find patch embedding convolution.")
+
             # Adapt patch embedding to 1-channel input
-            orig_proj = encoder.patch_embed.proj
             new_proj  = nn.Conv2d(
                 1, orig_proj.out_channels,
                 kernel_size=orig_proj.kernel_size,
@@ -118,17 +132,30 @@ class MobileSAMSeg(nn.Module):
                 padding=orig_proj.padding,
                 bias=orig_proj.bias is not None,
             )
+            
             # Average RGB weights into single channel
             new_proj.weight.data = orig_proj.weight.data.mean(dim=1, keepdim=True)
             if orig_proj.bias is not None:
                 new_proj.bias.data = orig_proj.bias.data.clone()
-            encoder.patch_embed.proj = new_proj
+                
+            # Reassign the adapted convolution back to the model
+            if is_tiny_vit:
+                encoder.patch_embed.seq[0].c = new_proj
+            else:
+                encoder.patch_embed.proj = new_proj
 
-            print("[MobileSAM] Loaded TinyViT encoder from mobile_sam package.")
+            # FINAL REFINEMENT: Dynamic encoder class and safe placement
+            print(f"[MobileSAM] Using OFFICIAL MobileSAM implementation")
+            print(f"[MobileSAM] Source: mobile_sam package")
+            print(f"[MobileSAM] Model class: {encoder.__class__.__name__}")
+            print(f"[MobileSAM] Checkpoint: {ckpt_status}")
+
             return encoder
 
-        except ImportError:
-            print("[MobileSAM] mobile_sam not installed. Using fallback CNN encoder.")
+        except Exception as e:
+            print(f"[MobileSAM] WARNING: Official MobileSAM not loaded")
+            print(f"[MobileSAM] Falling back to built-in CNN encoder")
+            print(f"[MobileSAM] Reason: {str(e)}")
             return self._fallback_encoder()
 
     def _fallback_encoder(self) -> nn.Module:
@@ -145,40 +172,34 @@ class MobileSAMSeg(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B = x.shape[0]
+        orig_size = x.shape[2:]  # Save original dimensions
 
-        # Resize to expected image size if needed
-        if x.shape[-1] != self.image_size:
-            x = F.interpolate(x, size=(self.image_size, self.image_size),
-                              mode="bilinear", align_corners=False)
+        if x.shape[-1] != self.encoder_input_size:
+            x_enc = F.interpolate(x, size=(self.encoder_input_size, self.encoder_input_size),
+                                  mode="bilinear", align_corners=False)
+        else:
+            x_enc = x
 
-        img_emb = self.encoder(x)
+        img_emb = self.encoder(x_enc)
 
-        # Handle TinyViT output shape (B, H, W, C) → (B, C, H, W)
-        if img_emb.dim() == 4 and img_emb.shape[-1] != img_emb.shape[1]:
+        # FIX: Safely permute ONLY if the channel dimension is last (e.g., standard SAM ViT).
+        # TinyViT and fallback CNN natively output (B, C, H, W), so we avoid permuting them.
+        if img_emb.dim() == 4 and img_emb.shape[-1] == self.EMBED_DIM:
             img_emb = img_emb.permute(0, 3, 1, 2)
 
         prompt_emb = self.prompt_encoder(B, x.device)
 
-        # Simple decoder: project and upsample
+        # Decode using the Lightweight Mask Decoder
+        decoded = self.mask_decoder(img_emb, prompt_emb)
+        
+        # Restore back to original dataset resolution
         logits = F.interpolate(
-            self._decode(img_emb),
-            size=x.shape[2:],
+            decoded,
+            size=orig_size,
             mode="bilinear",
             align_corners=False,
         )
         return logits
-
-    def _decode(self, img_emb: torch.Tensor) -> torch.Tensor:
-        B, C, H, W = img_emb.shape
-        proj = nn.functional.adaptive_avg_pool2d(img_emb, 1)  # (B, C, 1, 1)
-        proj = proj.expand(-1, -1, H, W)
-        combined = img_emb + proj
-        # Upsample to rough output size
-        up = F.interpolate(combined, scale_factor=4, mode="bilinear", align_corners=False)
-        # Project to num_classes
-        if not hasattr(self, "_out_proj"):
-            self._out_proj = nn.Conv2d(C, self.num_classes, 1).to(img_emb.device)
-        return self._out_proj(up)
 
     def inject_lora(self, r: int = 4, lora_alpha: float = 1.0,
                     lora_dropout: float = 0.0, strategy: str = "attention_blocks"):
@@ -196,12 +217,14 @@ class MobileSAMSeg(nn.Module):
 
     def encode_image(self, x: torch.Tensor) -> torch.Tensor:
         """Feature extraction for evaluation."""
-        if x.shape[-1] != self.image_size:
-            x = F.interpolate(x, size=(self.image_size, self.image_size),
+        if x.shape[-1] != self.encoder_input_size:
+            x = F.interpolate(x, size=(self.encoder_input_size, self.encoder_input_size),
                               mode="bilinear", align_corners=False)
         img_emb = self.encoder(x)
-        if img_emb.dim() == 4 and img_emb.shape[-1] != img_emb.shape[1]:
+        
+        if img_emb.dim() == 4 and img_emb.shape[-1] == self.EMBED_DIM:
             img_emb = img_emb.permute(0, 3, 1, 2)
+            
         return img_emb.mean(dim=[2, 3])
 
     def count_parameters(self):

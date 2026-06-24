@@ -1,10 +1,11 @@
 """
 Main Entry Point for Holographic AI Framework.
-Strictly separates Training, Evaluation, and Benchmarking modes.
+Strictly separates Training, Evaluation, and Rank Sweep modes.
 """
 import argparse
 import os
-import yaml
+os.environ["TORCH_HOME"] = os.path.join(os.path.dirname(__file__), "cache")
+import gc
 import torch
 import warnings
 from pathlib import Path
@@ -12,122 +13,152 @@ from pathlib import Path
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 warnings.filterwarnings("ignore")
 
-from torch.utils.data import DataLoader
-
+from datasets.qpi_dataset import get_qpi_loaders
 from models import get_model
-from datasets.qpi_dataset import QPIDataset
 from training.trainer_seg import SegmentationTrainer
-from training.losses import PhysicsAwarePhaseLoss
-from evaluation.seg_metrics import SegmentationEvaluator
-from evaluation.profiling import ModelProfiler
+from evaluation.evaluate import SegmentationEvaluator
+from evaluation.metrics import MetricsTracker
 from utils.helpers import seed_everything
+from utils.config import load_config_from_yaml
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Physics-Aware QPI Segmentation Models")
-    parser.add_argument('--mode', type=str, required=True, choices=['train', 'evaluate', 'benchmark'])
+    # Added 'sweep' to the allowed modes
+    parser.add_argument('--mode', type=str, required=True, choices=['train', 'evaluate', 'sweep'])
     parser.add_argument('--config', type=str, required=True, help="Path to config yaml")
     parser.add_argument('--gpu', type=int, default=0)
     parser.add_argument('--seed', type=int, default=42)
+    # Added ranks argument specifically for the sweep mode
+    parser.add_argument('--ranks', type=int, nargs='+', default=[2, 4, 8, 16], help="List of LoRA ranks to sweep")
     return parser.parse_args()
 
-def init_environment(args):
+def init_environment(args, override_rank=None):
     """Setup config, device, data, and model."""
-    with open(args.config, 'r') as f:
-        config = yaml.safe_load(f)
-        
-    config['device'] = f"cuda:{args.gpu}" if torch.cuda.is_available() else "cpu"
+    config = load_config_from_yaml(args.config)
+    config.device = f"cuda:{args.gpu}" if torch.cuda.is_available() else "cpu"
     seed_everything(args.seed)
     
-    print(f"Initializing {config['model']['architecture'].upper()}")
-    model = get_model(config['model']['architecture'], config.get('lora', None))
-    model.to(config['device'])
+    # If sweeping, dynamically override the rank and directories in memory
+    if override_rank is not None:
+        config.lora_r = override_rank
+        config.lora_alpha = float(override_rank)  # Override alpha BEFORE the model is built
+        base_dir = getattr(config, 'results_dir', Path('results'))
+        # Create separate output folders for each rank (e.g., results_dir_r8)
+        config.results_dir = Path(f"{str(base_dir)}_r{override_rank}")
+        config.checkpoint_dir = config.results_dir / "checkpoints"
+        
+    print(f"Initializing {config.architecture.upper()} (LoRA r={getattr(config, 'lora_r', 'None')})")
+    
+    if hasattr(config, 'lora_r') and hasattr(config, 'lora_alpha'):
+        scaling = float(config.lora_alpha) / float(config.lora_r)
+        print(f"  -> Verified LoRA Config: r={config.lora_r}, alpha={config.lora_alpha}, scaling={scaling:.2f}")
+
+    model = get_model(config.architecture, config)
+    model.to(config.device)
     
     return model, config
 
-def get_dataloader(config, split='train'):
-    """Initializes the QPI Dataset."""
-    dir_key = f"{split}_dir" # assumes config has phase_dir and mask_dir under dataset
-    dataset = QPIDataset(
-        phase_dir=config['dataset']['phase_dir'].replace('train', split), 
-        mask_dir=config['dataset']['mask_dir'].replace('train', split), 
-        config=config
-    )
-    return DataLoader(
-        dataset, 
-        batch_size=config['dataset']['batch_size'], 
-        shuffle=(split == 'train'),
-        num_workers=config['dataset']['num_workers']
-    )
-
-# --- MODES ---
-
 def run_train(args):
     model, config = init_environment(args)
-    dataloader = get_dataloader(config, split='train')
     
-    print("Initializing Physics-Aware Loss...")
-    criterion = PhysicsAwarePhaseLoss(
-        lambda1=config['loss_weights']['lambda1_pmc'],
-        lambda2=config['loss_weights']['lambda2_bga'],
-        lambda3=config['loss_weights']['lambda3_pv']
-    )
+    train_loader, val_loader, _ = get_qpi_loaders(config, num_workers=config.num_workers)
+    metrics_tracker = MetricsTracker(config.architecture, config.results_dir)
     
     print(f"\n{'='*40}\nSTARTING TRAINING\n{'='*40}")
     trainer = SegmentationTrainer(
         model=model, 
-        dataloader=dataloader, 
-        criterion=criterion, 
         config=config,
-        device=config['device']
+        metrics_tracker=metrics_tracker
     )
     trainer.train()
     print("Training Complete.")
 
 def run_evaluate(args):
     model, config = init_environment(args)
-    # TODO: Implement load_checkpoint for the new segmentation models
-    # model = load_checkpoint(model, config) 
+    
+    best_model_path = config.checkpoint_dir / "best_model.pt"
+    if best_model_path.exists():
+        ckpt = torch.load(best_model_path, map_location=config.device)
+        model.load_state_dict(ckpt.get("model_state", ckpt))
+        print(f"Loaded checkpoint from {best_model_path}")
+    else:
+        print("Warning: No checkpoint found. Evaluating with initialized weights.")
+        
     model.eval()
     
-    test_loader = get_dataloader(config, split='test')
+    # FIX: Extract the test_loader (3rd element) instead of val_loader
+    _, _, test_loader = get_qpi_loaders(config, num_workers=config.num_workers)
+    
+    if test_loader is None:
+        print("No test dataset found. Aborting evaluation.")
+        return
+        
     evaluator = SegmentationEvaluator(model, config)
     
     print(f"\n{'='*40}\nSTARTING EVALUATION\n{'='*40}")
+    # FIX: Evaluate strictly on the test set
     metrics = evaluator.evaluate(test_loader)
-    print("Evaluation Complete. Results:", metrics)
+    print("\nEvaluation Complete. Results:")
+    for k, v in metrics.items():
+        print(f"  {k}: {v:.4f}")
 
-def run_benchmark(args):
-    """
-    Run benchmarking to measure edge deployment feasibility (Latency, FPS, Memory).
-    """
-    print(f"\n{'='*60}")
-    print(f"BENCHMARK SUITE: Edge Deployability ({args.config})")
-    print(f"{'='*60}")
+def run_sweep(args):
+    """Executes the systematic evaluation of different LoRA ranks sequentially."""
+    print(f"\n{'='*50}\nSTARTING LORA RANK SWEEP: {args.ranks}\n{'='*50}")
+    
+    for r in args.ranks:
+        print(f"\n\n>>>>> TRAINING WITH LORA RANK: {r} <<<<<")
+        
+        # Initialize everything with the overridden rank
+        model, config = init_environment(args, override_rank=r)
+        
+        # Override lora_alpha dynamically to keep the LoRA scaling ratio (alpha/r) equal to 1.0
+        config.lora_alpha = float(r)
+        metrics_tracker = MetricsTracker(f"{config.architecture}_r{r}", config.results_dir)
+        trainer = SegmentationTrainer(model, config, metrics_tracker)
+        trainer.train()
+        print(f"Finished training for rank {r}.")
+        # ==========================================
+        # AUTOMATIC EVALUATION BLOCK
+        # ==========================================
+        print(f"\n{'='*40}\nAUTOMATIC EVALUATION FOR RANK: {r}\n{'='*40}")
+        
+        # 1. Load the best weights that were just saved by the trainer
+        best_model_path = config.checkpoint_dir / "best_model.pt"
+        if best_model_path.exists():
+            ckpt = torch.load(best_model_path, map_location=config.device)
+            model.load_state_dict(ckpt.get("model_state", ckpt))
+            print(f"[Sweep Eval] Loaded best checkpoint from {best_model_path}")
+        else:
+            print("[Sweep Eval] Warning: No checkpoint found. Evaluating with current weights.")
+            
+        model.eval()
 
-    model, config = init_environment(args)
-    model.eval()
-    
-    test_loader = get_dataloader(config, split='test')
-    
-    # Use the ModelProfiler from your old repo
-    run_name = f"{config['model']['architecture']}_benchmark"
-    profiler = ModelProfiler(model, run_name, config)
-    
-    print(f"\n>>> Running Profiler on {config['device']}...")
-    try:
-        # Assuming ModelProfiler measures latency, FPS, and peak memory
-        results = profiler.profile(test_loader, num_samples=100) 
-        profiler.save_results(results)
-        profiler.print_summary(results)
-    except Exception as e:
-        print(f"Benchmark failed: {e}")
-        import traceback; traceback.print_exc()
+        # 2. Get the evaluation dataloader
+        _, val_loader, test_loader = get_qpi_loaders(config, num_workers=getattr(config, 'num_workers', 4))
+        eval_loader = test_loader if test_loader is not None else val_loader
+
+        if eval_loader is not None:
+            config.lora_rank = r  # Ensure evaluate.py has the rank for the CSV naming
+            evaluator = SegmentationEvaluator(model, config)
+            metrics = evaluator.evaluate(eval_loader)
+            print(f"\nSweep Evaluation Complete for rank {r}.")
+        else:
+            print("No evaluation data found. Skipping evaluation.")
+        # Critical: Free up GPU memory before starting the next rank
+        del model
+        del trainer
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            
+    print(f"\n{'='*50}\nRANK SWEEP COMPLETE\n{'='*50}")
 
 def main():
     args = parse_args()
     if args.mode == 'train': run_train(args)
     elif args.mode == 'evaluate': run_evaluate(args)
-    elif args.mode == 'benchmark': run_benchmark(args)
+    elif args.mode == 'sweep': run_sweep(args)
 
 if __name__ == "__main__":
     main()

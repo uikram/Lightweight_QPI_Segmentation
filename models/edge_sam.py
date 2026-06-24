@@ -20,12 +20,17 @@ class DepthwiseSeparableConv(nn.Module):
         super().__init__()
         self.dw = nn.Conv2d(in_ch, in_ch, 3, stride=stride, padding=1,
                             groups=in_ch, bias=False)
+        self.bn1 = nn.BatchNorm2d(in_ch)
+        self.act1 = nn.ReLU6(inplace=True)
+        
         self.pw = nn.Conv2d(in_ch, out_ch, 1, bias=False)
-        self.bn = nn.BatchNorm2d(out_ch)
-        self.act = nn.ReLU6(inplace=True)
+        self.bn2 = nn.BatchNorm2d(out_ch)
+        self.act2 = nn.ReLU6(inplace=True)
 
     def forward(self, x):
-        return self.act(self.bn(self.pw(self.dw(x))))
+        x = self.act1(self.bn1(self.dw(x)))
+        x = self.act2(self.bn2(self.pw(x)))
+        return x
 
 
 class InvertedResidual(nn.Module):
@@ -90,7 +95,7 @@ class EdgeEncoder(nn.Module):
             InvertedResidual(64, 64, stride=1, expand_ratio=6),
         )
         # Stage 5 (bottleneck)
-        self.stage5 = nn.Sequential(
+        self.bottleneck = nn.Sequential(
             InvertedResidual(64, 96, stride=1, expand_ratio=6),
             InvertedResidual(96, 96, stride=1, expand_ratio=6),
             InvertedResidual(96, 96, stride=1, expand_ratio=6),
@@ -108,7 +113,7 @@ class EdgeEncoder(nn.Module):
         s2 = self.stage2(s1)
         s3 = self.stage3(s2)
         s4 = self.stage4(s3)
-        s5 = self.stage5(s4)
+        s5 = self.bottleneck(s4)
         return s1, s2, s3, s4, s5
 
 
@@ -157,49 +162,133 @@ class EdgeSAMSeg(nn.Module):
     Output: (B, num_classes, H, W) – segmentation logits
     """
 
-    def __init__(self, num_classes: int = 1, pretrained: bool = False):
+    def __init__(self, num_classes: int = 1, pretrained: bool = False, image_size: int = 1024):
         super().__init__()
         self.num_classes = num_classes
+        self.image_size = image_size
 
         self.encoder = self._build_encoder(pretrained)
-        self.decoder = EdgeDecoder(
-            encoder_channels=self.encoder.out_channels,
-            num_classes=num_classes,
-        )
+
+        # Track which encoder path was loaded so forward() can gate the resize correctly
+        self.use_sam_encoder = not isinstance(self.encoder, EdgeEncoder)
+
+        if isinstance(self.encoder, EdgeEncoder):
+            self.decoder = EdgeDecoder(
+                encoder_channels=self.encoder.out_channels,
+                num_classes=num_classes,
+            )
+            self.use_simple_decoder = False
+        else:
+            bottleneck_dim = self.encoder.out_channels[-1] if hasattr(self.encoder, 'out_channels') else 256
+            self.simple_decoder = nn.Sequential(
+                nn.ConvTranspose2d(bottleneck_dim, 128, kernel_size=2, stride=2),
+                nn.BatchNorm2d(128),
+                nn.ReLU6(inplace=True),
+                nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2),
+                nn.BatchNorm2d(64),
+                nn.ReLU6(inplace=True),
+                nn.ConvTranspose2d(64, 32, kernel_size=2, stride=2),
+                nn.BatchNorm2d(32),
+                nn.ReLU6(inplace=True),
+                nn.ConvTranspose2d(32, 16, kernel_size=2, stride=2),
+                nn.BatchNorm2d(16),
+                nn.ReLU6(inplace=True),
+                nn.Conv2d(16, self.num_classes, kernel_size=1)
+            )
+            self.use_simple_decoder = True
+            
         self._lora_injected = False
 
-    def _build_encoder(self, pretrained: bool) -> EdgeEncoder:
-        """
-        Build encoder. Attempts EdgeSAM official encoder first,
-        falls back to our efficient EdgeEncoder.
-        """
+    def _build_encoder(self, pretrained: bool):
         try:
             from edge_sam import sam_model_registry
-            sam     = sam_model_registry["edge_sam"](checkpoint=None)
+            import os
+            
+            ckpt_path = "weights/edge_sam_3x.pth"
+            
+            if pretrained:
+                if not os.path.exists(ckpt_path):
+                    raise FileNotFoundError(
+                        f"EdgeSAM checkpoint not found at {ckpt_path}. "
+                        f"LoRA adaptation requires pretrained weights."
+                    )
+                sam = sam_model_registry["edge_sam"](checkpoint=ckpt_path)
+                ckpt_status = ckpt_path
+            else:
+                sam = sam_model_registry["edge_sam"](checkpoint=None)
+                ckpt_status = "None (Random Weights)"
+                
             encoder = sam.image_encoder
 
-            # Adapt to 1-channel input
-            orig = encoder.patch_embed.proj
-            new  = nn.Conv2d(1, orig.out_channels, orig.kernel_size,
-                             orig.stride, orig.padding, bias=orig.bias is not None)
-            new.weight.data = orig.weight.data.mean(dim=1, keepdim=True)
-            if orig.bias is not None:
-                new.bias.data = orig.bias.data.clone()
-            encoder.patch_embed.proj = new
+            first_conv_name = None
+            first_conv_layer = None
+            parent_module = encoder
+            
+            for name, module in encoder.named_modules():
+                if isinstance(module, nn.Conv2d) and module.in_channels == 3:
+                    first_conv_name = name.split('.')[-1]
+                    first_conv_layer = module
+                    for part in name.split('.')[:-1]:
+                        parent_module = getattr(parent_module, part)
+                    break
+                    
+            if first_conv_layer is None:
+                raise AttributeError("Could not find initial 3-channel Conv2d to adapt.")
+                
+            new_conv = nn.Conv2d(
+                1, first_conv_layer.out_channels, 
+                first_conv_layer.kernel_size,
+                first_conv_layer.stride, 
+                first_conv_layer.padding, 
+                bias=first_conv_layer.bias is not None
+            )
+            
+            new_conv.weight.data = first_conv_layer.weight.data.mean(dim=1, keepdim=True)
+            if first_conv_layer.bias is not None:
+                new_conv.bias.data = first_conv_layer.bias.data.clone()
+                
+            setattr(parent_module, first_conv_name, new_conv)
+            
             encoder.out_channels = [64, 128, 256, 512, 256]
-            print("[EdgeSAM] Loaded official EdgeSAM encoder.")
+            
+            # FINAL REFINEMENT: Dynamic encoder class and safe placement
+            print(f"[EdgeSAM] Using OFFICIAL EdgeSAM implementation")
+            print(f"[EdgeSAM] Source: edge_sam package")
+            print(f"[EdgeSAM] Model class: {encoder.__class__.__name__}")
+            print(f"[EdgeSAM] Checkpoint: {ckpt_status}")
+            
             return encoder
 
-        except (ImportError, Exception):
-            print("[EdgeSAM] edge_sam not installed. Using built-in EdgeEncoder.")
+        except Exception as e:
+            print(f"[EdgeSAM] WARNING: Official EdgeSAM not loaded")
+            print(f"[EdgeSAM] Falling back to built-in EdgeEncoder")
+            print(f"[EdgeSAM] Reason: {str(e)}")
             return EdgeEncoder()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        skips = self.encoder(x)
-        logits = self.decoder(*skips)
-        # Ensure output matches input spatial size
-        if logits.shape[2:] != x.shape[2:]:
-            logits = F.interpolate(logits, size=x.shape[2:],
+        original_size = x.shape[2:]
+        
+        # 1. Resize input to expected native resolution
+        if x.shape[-1] != self.image_size or x.shape[-2] != self.image_size:
+            x_enc = F.interpolate(x, size=(self.image_size, self.image_size),
+                                  mode="bilinear", align_corners=False)
+        else:
+            x_enc = x
+
+        skips = self.encoder(x_enc)
+        
+        # 2. Gate the decoder based on which encoder was successfully loaded
+        if self.use_simple_decoder:
+            # Official EdgeSAM encoder returns a single tensor (or a tuple where we want the last element)
+            feat = skips[-1] if isinstance(skips, (tuple, list)) else skips
+            logits = self.simple_decoder(feat)
+        else:
+            # Fallback EdgeEncoder returns exactly 5 feature maps expected by EdgeDecoder
+            logits = self.decoder(*skips)
+        
+        # 3. Ensure output matches original input spatial size
+        if logits.shape[2:] != original_size:
+            logits = F.interpolate(logits, size=original_size,
                                    mode="bilinear", align_corners=False)
         return logits
 
@@ -219,6 +308,9 @@ class EdgeSAMSeg(nn.Module):
 
     def encode_image(self, x: torch.Tensor) -> torch.Tensor:
         """Feature extraction for evaluation."""
+        if x.shape[-1] != self.image_size or x.shape[-2] != self.image_size:
+            x = F.interpolate(x, size=(self.image_size, self.image_size),
+                              mode="bilinear", align_corners=False)
         skips = self.encoder(x)
         return skips[-1].mean(dim=[2, 3])
 

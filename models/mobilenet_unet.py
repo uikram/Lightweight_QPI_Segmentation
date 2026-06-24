@@ -62,9 +62,14 @@ class MobileNetUNet(nn.Module):
             decoder_channels = [256, 128, 64, 32]
 
         # ----- Encoder -----
-        backbone = mobilenet_v2(
-            weights=MobileNet_V2_Weights.IMAGENET1K_V1 if pretrained else None
-        )
+        weights_to_use = MobileNet_V2_Weights.IMAGENET1K_V1 if pretrained else None
+        backbone = mobilenet_v2(weights=weights_to_use)
+        
+        # FINAL REFINEMENT: Dynamic class name extraction instead of hardcoding
+        print(f"[MobileNetUNet] Using OFFICIAL implementation")
+        print(f"[MobileNetUNet] Source: torchvision.models package")
+        print(f"[MobileNetUNet] Model class: {backbone.__class__.__name__}")
+        print(f"[MobileNetUNet] Checkpoint: {'IMAGENET1K_V1' if pretrained else 'None (Random Weights)'}")
 
         # Adapt first conv to accept 1-channel input
         # Average the 3-channel pretrained weights across channels
@@ -121,9 +126,13 @@ class MobileNetUNet(nn.Module):
         return self.final_conv(out)
 
     def inject_lora(self, r: int = 4, lora_alpha: float = 1.0,
-                    lora_dropout: float = 0.0, strategy: str = "attention_blocks"):
+                    lora_dropout: float = 0.0, strategy: str = "encoder_only"):
         inject_lora_into_model(self, r=r, lora_alpha=lora_alpha,
                                lora_dropout=lora_dropout, strategy=strategy)
+        # Forcefully unfreeze all decoder, upsampling, and final projection layers
+        for name, param in self.named_parameters():
+            if any(substring in name for substring in ["dec", "up", "final"]):
+                param.requires_grad = True
         self._lora_injected = True
         return self
 

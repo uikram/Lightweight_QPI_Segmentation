@@ -1,20 +1,24 @@
 experiment_name: "edge_sam_lora_qpi"
 
+cache_dir: "./cache"
+
+data_root: "./dataset"
+
 dataset:
-  phase_dir: "data/qpi/train/phase"
-  mask_dir: "data/qpi/train/mask"
   batch_size: 16
   num_workers: 4
+  image_size: 256
 
 model:
   architecture: "edge_sam"
   in_channels: 1
-  num_classes: 1
+  num_classes: 5
 
 lora:
-  rank_sweep: [2, 4, 8, 16]
-  insertion_strategy: "bottleneck"
-  target_modules: ["bottleneck.*.conv"]
+  lora_r: 8
+  lora_alpha: 8.0
+  lora_dropout: 0.0
+  insertion_strategy: "encoder_only"
 
 training:
   epochs: 50
@@ -26,3 +30,7 @@ loss_weights:
   lambda1_pmc: 0.1
   lambda2_bga: 0.05
   lambda3_pv: 0.1
+  class_weights: [0.5, 1.0, 1.5, 2.0, 2.0]
+
+results_dir: "results/edge_sam_lora"
+checkpoint_dir: "results/edge_sam_lora/checkpoints"

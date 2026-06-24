@@ -9,6 +9,14 @@ import torch.nn as nn
 import math
 from typing import List, Optional
 
+_HEAD_PATTERNS = (
+    "final_conv", 
+    "mask_decoder", 
+    "simple_decoder", 
+    "prompt",
+    "outc",          
+    "final_up"    
+)
 
 class LoRALinear(nn.Module):
     """
@@ -59,14 +67,27 @@ class LoRALinear(nn.Module):
         return base_out + lora_out
 
     def merge(self):
-        """Merge LoRA weights into base weight for inference."""
         if not self.merged:
-            self.weight.data += (self.lora_B @ self.lora_A) * self.scaling
+            # W' = W + (B @ A) * scaling
+            A_weight = self.lora_A  # (r, in_features)
+            B_weight = self.lora_B  # (out_features, r)
+            
+            # Compute the low-rank delta
+            delta = (B_weight @ A_weight) * self.scaling
+            
+            # Reshape delta to match the base Conv2D/Linear weight shape
+            delta = delta.view(self.weight.shape)
+            
+            self.weight.data += delta
             self.merged = True
 
     def unmerge(self):
         if self.merged:
-            self.weight.data -= (self.lora_B @ self.lora_A) * self.scaling
+            A_weight = self.lora_A
+            B_weight = self.lora_B
+            delta = (B_weight @ A_weight) * self.scaling
+            delta = delta.view(self.weight.shape)
+            self.weight.data -= delta
             self.merged = False
 
     @classmethod
@@ -92,7 +113,7 @@ class LoRAConv2d(nn.Module):
     """
 
     def __init__(self, in_channels: int, out_channels: int, kernel_size: int,
-                 stride: int = 1, padding: int = 0, r: int = 4,
+                 stride: int = 1, padding: int = 0, groups: int = 1, r: int = 4,
                  lora_alpha: float = 1.0, lora_dropout: float = 0.0):
         super().__init__()
         self.in_channels  = in_channels
@@ -100,12 +121,14 @@ class LoRAConv2d(nn.Module):
         self.kernel_size  = kernel_size
         self.stride       = stride
         self.padding      = padding
+        self.groups       = groups
         self.r            = r
         self.scaling      = lora_alpha / r
         self.merged       = False
 
+        # Properly scale the in_channels by groups for depthwise compatibility
         self.weight = nn.Parameter(
-            torch.empty(out_channels, in_channels, kernel_size, kernel_size),
+            torch.empty(out_channels, in_channels // groups, kernel_size, kernel_size),
             requires_grad=False
         )
         self.bias = None
@@ -124,11 +147,43 @@ class LoRAConv2d(nn.Module):
             self.lora_dropout = nn.Identity()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # 1. Skip LoRA branches if weights are already merged
+        if self.merged:
+            return nn.functional.conv2d(
+                x, self.weight, bias=self.bias, stride=self.stride, 
+                padding=self.padding, groups=self.groups
+            )
+
         base_out = nn.functional.conv2d(
-            x, self.weight, self.bias, self.stride, self.padding
+            x, self.weight, bias=self.bias, stride=self.stride, 
+            padding=self.padding, groups=self.groups
         )
         lora_out = self.lora_B(self.lora_A(self.lora_dropout(x))) * self.scaling
         return base_out + lora_out
+
+    def merge(self):
+        """Mathematically merge the low-rank A and B convolutions into the base weight."""
+        if not self.merged:
+            # weight_A: (r, in_channels, 1, 1)
+            # weight_B: (out_channels, r, kernel_size, kernel_size)
+            weight_A = self.lora_A.weight.data.squeeze(3).squeeze(2) # (r, in_channels)
+            weight_B = self.lora_B.weight.data                       # (out_channels, r, k, k)
+            
+            # Einsum contraction: sum over the rank dimension
+            delta = torch.einsum('o r h w, r i -> o i h w', weight_B, weight_A)
+            
+            self.weight.data += delta * self.scaling
+            self.merged = True
+
+    def unmerge(self):
+        if self.merged:
+            weight_A = self.lora_A.weight.data.squeeze(3).squeeze(2)
+            weight_B = self.lora_B.weight.data
+            
+            delta = torch.einsum('o r h w, r i -> o i h w', weight_B, weight_A)
+            
+            self.weight.data -= delta * self.scaling
+            self.merged = False
 
     @classmethod
     def from_conv2d(cls, conv: nn.Conv2d, r: int = 4,
@@ -139,11 +194,17 @@ class LoRAConv2d(nn.Module):
             kernel_size=conv.kernel_size[0],
             stride=conv.stride[0],
             padding=conv.padding[0],
+            groups=conv.groups,
             r=r,
             lora_alpha=lora_alpha,
             lora_dropout=lora_dropout,
         )
         lora_conv.weight.data = conv.weight.data.clone()
+        
+        # Preserve the original bias if it exists
+        if conv.bias is not None:
+            lora_conv.bias = nn.Parameter(conv.bias.data.clone(), requires_grad=False)
+            
         return lora_conv
 
 
@@ -162,42 +223,52 @@ def inject_lora_into_model(
     strategy: str = "attention_blocks",
     target_module_names: Optional[List[str]] = None,
 ) -> nn.Module:
-    """
-    Inject LoRA into a segmentation model.
-
-    Strategies:
-        encoder_only     – targets Linear layers in encoder blocks
-        attention_blocks – targets q/v projection linears in attention
-        bottleneck       – targets Conv2d layers at bottleneck
-
-    Returns the model with LoRA layers injected and base weights frozen.
-    """
+    
     assert strategy in INSERTION_STRATEGIES, \
         f"strategy must be one of {INSERTION_STRATEGIES}"
 
-    # Freeze all parameters first
+    # Freeze ALL parameters first
     for param in model.parameters():
         param.requires_grad = False
 
     replacements = 0
 
     for name, module in model.named_modules():
-        # Determine whether this module should receive LoRA
         should_inject = _should_inject(name, module, strategy, target_module_names)
 
         if should_inject and isinstance(module, nn.Linear):
-            parent, attr = _get_parent_and_attr(model, name)
-            lora_layer = LoRALinear.from_linear(module, r=r, lora_alpha=lora_alpha,
-                                                lora_dropout=lora_dropout)
-            setattr(parent, attr, lora_layer)
+            lora_layer = LoRALinear.from_linear(module, r=r, lora_alpha=lora_alpha, lora_dropout=lora_dropout)
+            _replace_module(model, name, lora_layer)
             replacements += 1
 
-        elif should_inject and isinstance(module, nn.Conv2d) and strategy == "bottleneck":
-            parent, attr = _get_parent_and_attr(model, name)
-            lora_layer = LoRAConv2d.from_conv2d(module, r=r, lora_alpha=lora_alpha,
-                                                lora_dropout=lora_dropout)
-            setattr(parent, attr, lora_layer)
+        elif should_inject and isinstance(module, nn.Conv2d) and strategy in ("bottleneck", "encoder_only"):
+            lora_layer = LoRAConv2d.from_conv2d(module, r=r, lora_alpha=lora_alpha, lora_dropout=lora_dropout)
+            _replace_module(model, name, lora_layer)
             replacements += 1
+
+    # Unfreeze only the explicit segmentation head layers and prompts.
+    for name, param in model.named_parameters():
+        if any(pat in name for pat in _HEAD_PATTERNS):
+            param.requires_grad = True
+            
+    # [CRITICAL FIX: UNFREEZE NORMALIZATION FOR DOMAIN ADAPTATION]
+    for module in model.modules():
+        if isinstance(module, (nn.BatchNorm2d, nn.LayerNorm, nn.GroupNorm)):
+            if hasattr(module, 'weight') and module.weight is not None:
+                module.weight.requires_grad = True
+            if hasattr(module, 'bias') and module.bias is not None:
+                module.bias.requires_grad = True
+                
+    # ==============================================================
+    # ADD THIS BLOCK: Unfreeze the modified 1-channel QPI stem
+    # ==============================================================
+    for module in model.modules():
+        if isinstance(module, nn.Conv2d) and module.in_channels == 1:
+            if hasattr(module, 'weight') and module.weight is not None:
+                module.weight.requires_grad = True
+            if hasattr(module, 'bias') and module.bias is not None:
+                module.bias.requires_grad = True
+    # ==============================================================
 
     print(f"[LoRA] Injected {replacements} LoRA layers (strategy={strategy}, r={r})")
     _print_trainable_parameters(model)
@@ -209,36 +280,59 @@ def merge_lora_weights(model: nn.Module) -> nn.Module:
     for module in model.modules():
         if isinstance(module, (LoRALinear, LoRAConv2d)):
             if hasattr(module, "merge"):
-                module.merge()
-    print("[LoRA] All LoRA weights merged into base weights.")
+                try:
+                    module.merge()
+                    # 2. Bulletproof ONNX export: delete submodules entirely
+                    if hasattr(module, 'lora_A'): del module.lora_A
+                    if hasattr(module, 'lora_B'): del module.lora_B
+                    if hasattr(module, 'lora_dropout'): del module.lora_dropout
+                except NotImplementedError:
+                    pass 
+    print("[LoRA] All eligible LoRA weights merged into base weights and graph stripped for ONNX.")
     return model
 
 
 def _should_inject(name: str, module: nn.Module, strategy: str,
                    target_names: Optional[List[str]]) -> bool:
+    # Guard against ALL grouped convolutions (groups > 1) to prevent merge() crashes
+    if isinstance(module, nn.Conv2d) and module.groups > 1:
+        return False
+
     if target_names is not None:
         return any(t in name for t in target_names)
 
     if strategy == "encoder_only":
-        return "encoder" in name and isinstance(module, nn.Linear)
+        # FIX: Added "features", "blocks", "neck", "stage" to catch EdgeSAM/MobileSAM architectures
+        valid_names = ["enc", "features", "blocks", "neck", "stage", "patch_embed"]
+        return any(k in name for k in valid_names) and isinstance(module, (nn.Linear, nn.Conv2d))
 
     if strategy == "attention_blocks":
-        attention_keywords = ["q_proj", "v_proj", "query", "value",
-                              "attn.qkv", "self_attn"]
+        attention_keywords = [
+            "q_proj", "v_proj", "query", "value",
+            "attn.qkv", "self_attn", "qkv",
+        ]
         return any(kw in name for kw in attention_keywords)
 
     if strategy == "bottleneck":
-        return "bottleneck" in name or "neck" in name
+        return any(k in name for k in ["bottleneck", "neck"])
 
     return False
 
-
-def _get_parent_and_attr(model: nn.Module, name: str):
-    parts  = name.split(".")
+def _replace_module(model: nn.Module, name: str, new_module: nn.Module):
+    """Safely replace a module, handling both named attributes and sequential indices."""
+    parts = name.split(".")
     parent = model
     for part in parts[:-1]:
-        parent = getattr(parent, part)
-    return parent, parts[-1]
+        if part.isdigit():
+            parent = parent[int(part)]
+        else:
+            parent = getattr(parent, part)
+            
+    attr = parts[-1]
+    if attr.isdigit():
+        parent[int(attr)] = new_module
+    else:
+        setattr(parent, attr, new_module)
 
 
 def _print_trainable_parameters(model: nn.Module):

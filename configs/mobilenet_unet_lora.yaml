@@ -1,20 +1,25 @@
 experiment_name: "mobilenet_unet_lora_qpi"
 
+# Root directory containing X_train/, Y_train/, X_val/, Y_val/
+data_root: "./dataset"
+
+cache_dir: "./cache"
+
 dataset:
-  phase_dir: "data/qpi/train/phase"
-  mask_dir: "data/qpi/train/mask"
   batch_size: 16
   num_workers: 4
+  image_size: 256
 
 model:
   architecture: "mobilenet_unet"
   in_channels: 1
-  num_classes: 1
+  num_classes: 5          # Background + 4 cell morphology classes
 
 lora:
-  rank_sweep: [2, 4, 8, 16]
+  lora_r: 8               # Single rank used for training (sweep handled separately)
+  lora_alpha: 8.0         # Scaling = lora_alpha / lora_r = 1.0
+  lora_dropout: 0.0
   insertion_strategy: "encoder_only"
-  target_modules: ["encoder.blocks.*.conv"] # Example insertion points
 
 training:
   epochs: 50
@@ -23,6 +28,10 @@ training:
   mixed_precision: "fp16"
 
 loss_weights:
-  lambda1_pmc: 0.1   # Phase-Mask Contrast
-  lambda2_bga: 0.05  # Boundary-Gradient Alignment
-  lambda3_pv: 0.1    # Phase-Volume Preservation
+  lambda1_pmc: 0.1        # Phase-Mask Contrast
+  lambda2_bga: 0.05       # Boundary-Gradient Alignment
+  lambda3_pv: 0.1         # Phase-Volume Preservation
+  class_weights: [0.5, 1.0, 1.5, 2.0, 2.0]
+  
+results_dir: "results/mobilenet_unet_lora"
+checkpoint_dir: "results/mobilenet_unet_lora/checkpoints"
