@@ -1,0 +1,30 @@
+experiment_name: ablation_mobilenet_unet_dice_only
+data_root: ./dataset
+cache_dir: ./cache
+dataset:
+  batch_size: 16
+  num_workers: 4
+  image_size: 256
+model:
+  architecture: mobilenet_unet
+  in_channels: 1
+  num_classes: 5
+lora:
+  lora_r: 8
+  lora_alpha: 8.0
+  lora_dropout: 0.0
+  insertion_strategy: encoder_only
+training:
+  epochs: 50
+  learning_rate: 0.001
+  optimizer: AdamW
+  mixed_precision: fp16
+loss_type: dice_only
+class_weights:
+- 0.5
+- 1.0
+- 1.5
+- 2.0
+- 2.0
+results_dir: results/ablation/mobilenet_unet/dice_only
+checkpoint_dir: results/ablation/mobilenet_unet/dice_only/checkpoints

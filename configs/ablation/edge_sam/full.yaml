@@ -1,0 +1,33 @@
+experiment_name: ablation_edge_sam_full
+data_root: ./dataset
+cache_dir: ./cache
+dataset:
+  batch_size: 16
+  num_workers: 4
+  image_size: 256
+model:
+  architecture: edge_sam
+  in_channels: 1
+  num_classes: 5
+lora:
+  lora_r: 8
+  lora_alpha: 8.0
+  lora_dropout: 0.0
+  insertion_strategy: encoder_only
+training:
+  epochs: 50
+  learning_rate: 0.0005
+  optimizer: AdamW
+  mixed_precision: fp16
+loss_type: physics_aware
+class_weights:
+- 0.5
+- 1.0
+- 1.5
+- 2.0
+- 2.0
+results_dir: results/ablation/edge_sam/full
+checkpoint_dir: results/ablation/edge_sam/full/checkpoints
+lambda1_pmc: 0.1
+lambda2_bga: 0.05
+lambda3_pv: 0.1

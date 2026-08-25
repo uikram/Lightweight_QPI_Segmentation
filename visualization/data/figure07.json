@@ -1,0 +1,64 @@
+{
+  "description": "Component-wise loss ablation at r=8 (Fig. 7)",
+  "configs": [
+    "dice_only",
+    "pmc",
+    "pmc_bga",
+    "full"
+  ],
+  "config_labels": [
+    "$\\mathcal{L}_{Dice}$",
+    "$+\\mathcal{L}_{PMC}$",
+    "$+\\mathcal{L}_{BGA}$",
+    "Full $\\mathcal{L}$"
+  ],
+  "series": {
+    "EDGE_SAM": {
+      "boundary_f1": [
+        0.9376,
+        0.3864,
+        0.9293,
+        0.9527
+      ],
+      "phase_volume_error_pct": [
+        5.2229,
+        47.1964,
+        6.1335,
+        3.0434
+      ]
+    },
+    "MOBILE_SAM": {
+      "boundary_f1": [
+        0.6655,
+        0.5431,
+        0.6644,
+        0.4652
+      ],
+      "phase_volume_error_pct": [
+        2.4605,
+        10.0452,
+        2.3723,
+        7.2478
+      ]
+    },
+    "MOBILENET_UNET": {
+      "boundary_f1": [
+        0.9134,
+        0.9089,
+        0.9159,
+        0.9698
+      ],
+      "phase_volume_error_pct": [
+        15.5162,
+        16.522,
+        16.055,
+        3.0116
+      ]
+    }
+  },
+  "panel_order": [
+    "EDGE_SAM",
+    "MOBILENET_UNET",
+    "MOBILE_SAM"
+  ]
+}

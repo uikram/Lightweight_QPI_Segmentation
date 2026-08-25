@@ -45,17 +45,20 @@ class SegmentationEvaluator:
                     metrics = self.morphology_analyzer.compute_morphology(pred_fg_prob[i], phase_raw[i])
                     
                     sample_logs.append({
-                        "stem": batch.get("stem", [f"img_{batch_idx}_{i}"])[i], 
+                        "stem": str(batch.get("stem", [f"img_{batch_idx}_{i}"])[i]), 
                         "storage_day": batch["storage_day"][i].item() if "storage_day" in batch else 0,
                         "gt_class": batch["morphology_class"][i].item() if "morphology_class" in batch else 0,
                         "pred_class": dominant_class,
                         "area": metrics["area"],
                         "circularity": metrics["circularity"],
                         "opt_volume": metrics["optical_volume"],
+                        "mean_phase": metrics["mean_phase"],
+                        "max_phase": metrics["max_phase"],
+                        "dry_mass": metrics["dry_mass"],
                     })
                     
                     global_img_idx = (batch_idx * len(images)) + i
-                    print(f"Image {global_img_idx} | AI Class: {dominant_class} | Area: {metrics['area']:.2f} | Circularity: {metrics['circularity']:.4f} | Opt Volume: {metrics['optical_volume']:.2f}")
+                    print(f"Image {global_img_idx} | Class: {dominant_class} | Area: {metrics['area']:.2f} | Circ: {metrics['circularity']:.4f} | Vol: {metrics['optical_volume']:.2f} | Mean Phase: {metrics['mean_phase']:.4f} | Dry Mass: {metrics['dry_mass']:.4f}")
 
         # Dynamic subfolder resolution
         base_results_dir = Path(getattr(self.config, 'results_dir', 'results'))
@@ -78,7 +81,15 @@ class SegmentationEvaluator:
         csv_filename = f"morphology_trends_rank_{current_rank}.csv"
         csv_path = run_dir / csv_filename
         
-        pd.DataFrame(sample_logs).to_csv(csv_path, index=False)
+        if sample_logs:
+            import csv as csv_module
+            with open(csv_path, 'w', newline='') as csvfile:
+                fieldnames = list(sample_logs[0].keys())
+                writer = csv_module.DictWriter(csvfile, fieldnames=fieldnames)
+                writer.writeheader()
+                for log in sample_logs:
+                    clean = {str(k): (float(v) if hasattr(v, '__float__') else str(v)) for k, v in log.items()}
+                    writer.writerow(clean)
         print(f"\n[Evaluation] Saved temporal morphology trends to {csv_path}")
 
         results = self.seg_metrics.compute()
