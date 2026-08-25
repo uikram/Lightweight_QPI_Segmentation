@@ -1,0 +1,30 @@
+{
+  "description": "Per-class Dice at LoRA rank r=8 (Fig. 2)",
+  "source": "lora_sweep_metrics.csv, Rank==8",
+  "classes": [
+    "discocyte",
+    "echinocyte",
+    "spherocyte",
+    "stomatocyte"
+  ],
+  "series": {
+    "EDGE_SAM": [
+      0.8984,
+      0.776,
+      0.6968,
+      0.536
+    ],
+    "MOBILE_SAM": [
+      0.9301,
+      0.8516,
+      0.7578,
+      0.7096
+    ],
+    "MOBILENET_UNET": [
+      0.8942,
+      0.0,
+      0.7748,
+      0.0
+    ]
+  }
+}

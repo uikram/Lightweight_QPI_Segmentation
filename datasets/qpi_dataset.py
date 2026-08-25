@@ -233,8 +233,8 @@ class QPIDataset(Dataset):
 
     # ── Resize ────────────────────────────────────────────────────────────────
     def _resize(self, phase: np.ndarray, mask: np.ndarray):
-        ph = torch.from_numpy(phase).unsqueeze(0).unsqueeze(0)       # (1,1,H,W)
-        mk = torch.from_numpy(mask).unsqueeze(0).unsqueeze(0).float()
+        ph = torch.from_numpy(np.asarray(phase, dtype=np.float32).copy()).unsqueeze(0).unsqueeze(0)
+        mk = torch.from_numpy(np.asarray(mask, dtype=np.int64).copy()).unsqueeze(0).unsqueeze(0).float()
 
         ph = torch.nn.functional.interpolate(
             ph, size=(self.image_size, self.image_size),
@@ -262,10 +262,8 @@ class QPIDataset(Dataset):
 
         if self.image_size is not None:
             phase, mask = self._resize(phase, mask)
-
-        phase_t = torch.from_numpy(phase).unsqueeze(0)            # (1, H, W)
-        mask_t  = torch.from_numpy(mask).long()                   # (H, W)
-
+        phase_t = torch.from_numpy(np.asarray(phase, dtype=np.float32).copy()).unsqueeze(0)
+        mask_t  = torch.from_numpy(np.asarray(mask, dtype=np.int64).copy()).long()
         # FIX: Receive phase_raw directly from the transform pipeline
         phase_t, mask_t, phase_raw = self.transform(phase_t, mask_t)
 

@@ -1,0 +1,40 @@
+{
+  "description": "Radar of aggregate performance at r=8 (Fig. 3). Values are raw; visualization.py normalises each axis to the best model.",
+  "axes": [
+    "Mean Dice",
+    "AJI",
+    "Boundary F1",
+    "Throughput (FPS)",
+    "Memory efficiency (1/MB)"
+  ],
+  "series": {
+    "EDGE_SAM": [
+      0.7268,
+      0.4839,
+      0.9525,
+      228.3276,
+      0.0611
+    ],
+    "MOBILE_SAM": [
+      0.8123,
+      0.249,
+      0.6436,
+      57.1769,
+      0.0037
+    ],
+    "MOBILENET_UNET": [
+      0.4172,
+      0.6337,
+      0.9711,
+      376.1014,
+      0.0611
+    ]
+  },
+  "axis_labels_display": [
+    "Mean Dice",
+    "AJI",
+    "Boundary F1",
+    "Throughput",
+    "Memory eff."
+  ]
+}

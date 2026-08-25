@@ -1,0 +1,50 @@
+{
+  "description": "Accuracy-throughput operating points at r=8, FP16 (Fig. 5)",
+  "points": [
+    {
+      "architecture": "EDGE_SAM",
+      "runtime": "native",
+      "fps": 62.6433,
+      "mean_dice": 0.7268,
+      "peak_vram_mb": 157.3604,
+      "collapsed_classes": 0
+    },
+    {
+      "architecture": "EDGE_SAM",
+      "runtime": "ONNX",
+      "fps": 228.3276,
+      "mean_dice": 0.7268,
+      "peak_vram_mb": 16.375,
+      "collapsed_classes": 0
+    },
+    {
+      "architecture": "MOBILENET_UNET",
+      "runtime": "native",
+      "fps": 148.8681,
+      "mean_dice": 0.4172,
+      "peak_vram_mb": 161.2012,
+      "collapsed_classes": 2
+    },
+    {
+      "architecture": "MOBILENET_UNET",
+      "runtime": "ONNX",
+      "fps": 376.1014,
+      "mean_dice": 0.4172,
+      "peak_vram_mb": 16.375,
+      "collapsed_classes": 2
+    },
+    {
+      "architecture": "MOBILE_SAM",
+      "runtime": "native",
+      "fps": 57.1769,
+      "mean_dice": 0.8123,
+      "peak_vram_mb": 270.6987,
+      "collapsed_classes": 0
+    }
+  ],
+  "selected": {
+    "architecture": "EDGE_SAM",
+    "runtime": "ONNX"
+  },
+  "mode_collapse_band_max_dice": 0.505
+}

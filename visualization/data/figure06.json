@@ -1,0 +1,53 @@
+{
+  "description": "Per-class Dice, LoRA r=8 versus full fine-tuning (Fig. 6)",
+  "classes": [
+    "discocyte",
+    "echinocyte",
+    "spherocyte",
+    "stomatocyte"
+  ],
+  "series": {
+    "EDGE_SAM": {
+      "lora": [
+        0.8984,
+        0.776,
+        0.6968,
+        0.536
+      ],
+      "full_finetune": [
+        0.8799,
+        0.0,
+        0.7239,
+        0.6246
+      ]
+    },
+    "MOBILE_SAM": {
+      "lora": [
+        0.9301,
+        0.8516,
+        0.7578,
+        0.7096
+      ],
+      "full_finetune": [
+        0.8908,
+        0.0,
+        0.7838,
+        0.0
+      ]
+    },
+    "MOBILENET_UNET": {
+      "lora": [
+        0.8942,
+        0.0,
+        0.7748,
+        0.0
+      ],
+      "full_finetune": [
+        0.8978,
+        0.0,
+        0.782,
+        0.0
+      ]
+    }
+  }
+}
